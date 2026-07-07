@@ -16,4 +16,5 @@ pkg update && pkg upgrade
 pkg install python git nmap curl
 mkdir IPGrabber
 git clone https://github.com/batplatbot/IPGabber
+cd IPGabber
 python IPGrabber.py
