@@ -1,10 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
-Step1.py – Real payload for data exfiltration and scanning.
-DO NOT USE MALICIOUSLY.
-"""
-
 import os
 import sys
 import subprocess
